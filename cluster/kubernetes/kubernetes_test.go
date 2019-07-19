@@ -1,6 +1,7 @@
 package kubernetes
 
 import (
+	"context"
 	"reflect"
 	"testing"
 
@@ -25,10 +26,10 @@ func newNamespace(name string) *apiv1.Namespace {
 func testGetAllowedNamespaces(t *testing.T, namespace []string, expected []string) {
 	clientset := fakekubernetes.NewSimpleClientset(newNamespace("default"),
 		newNamespace("kube-system"))
+	client := ExtendedClient{coreClient: clientset}
+	c := NewCluster(client, nil, nil, log.NewNopLogger(), namespace, []string{})
 
-	c := NewCluster(clientset, nil, nil, nil, log.NewNopLogger(), namespace)
-
-	namespaces, err := c.getAllowedNamespaces()
+	namespaces, err := c.getAllowedAndExistingNamespaces(context.Background())
 	if err != nil {
 		t.Errorf("The error should be nil, not: %s", err)
 	}

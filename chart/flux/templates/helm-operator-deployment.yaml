@@ -1,9 +1,7 @@
-{{- $gitURL := default .Values.git.url .Values.helmOperator.git.url }}
-{{- $gitBranch := default .Values.git.branch .Values.helmOperator.git.branch }}
-{{- $gitPollInterval := default .Values.git.pollInterval .Values.helmOperator.git.pollInterval }}
 {{- $gitTimeout := default .Values.git.timeout .Values.helmOperator.git.timeout }}
+{{- $gitPollInterval := default .Values.git.pollInterval .Values.helmOperator.git.pollInterval }}
 {{- if .Values.helmOperator.create -}}
-apiVersion: apps/v1beta2
+apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: {{ template "flux.fullname" . }}-helm-operator
@@ -13,29 +11,42 @@ metadata:
     release: {{ .Release.Name }}
     heritage: {{ .Release.Service }}
 spec:
-  replicas: {{ .Values.replicaCount }}
+  replicas: {{ .Values.helmOperator.replicaCount }}
   selector:
     matchLabels:
       app: {{ template "flux.name" . }}-helm-operator
       release: {{ .Release.Name }}
   template:
     metadata:
-      {{- if .Values.prometheus.enabled }}
       annotations:
+      {{- if .Values.prometheus.enabled }}
         prometheus.io.scrape: "true"
+      {{- end }}
+      {{- if .Values.helmOperator.annotations }}
+      {{- .Values.helmOperator.annotations | toYaml | trimSuffix "\n" | nindent 8 }}
       {{- end }}
       labels:
         app: {{ template "flux.name" . }}-helm-operator
         release: {{ .Release.Name }}
     spec:
-      {{- if .Values.serviceAccount.create }}
       serviceAccountName: {{ template "flux.serviceAccountName" . }}
+      {{- if .Values.helmOperator.pullSecret }}
+      imagePullSecrets:
+        - name: {{ .Values.helmOperator.pullSecret }}
       {{- end }}
       volumes:
+      {{- if .Values.ssh.known_hosts }}
       - name: sshdir
         configMap:
           name: {{ template "flux.fullname" . }}-ssh-config
           defaultMode: 0600
+      {{- end }}
+      {{- if .Values.git.config.enabled }}
+      - name: git-config
+        secret:
+          secretName: {{ include "git.config.secretName" . }}
+          defaultMode: 0400
+      {{- end }}
       - name: git-key
         secret:
           {{- if .Values.helmOperator.git.secretName }}
@@ -58,15 +69,33 @@ spec:
           defaultMode: 0600
       {{- end }}
       {{- end }}
+      {{- if .Values.helmOperator.configureRepositories.enable }}
+      - name: {{ .Values.helmOperator.configureRepositories.volumeName | quote }}
+        secret:
+          secretName: {{ .Values.helmOperator.configureRepositories.secretName | quote }}
+      - name: {{ .Values.helmOperator.configureRepositories.cacheVolumeName | quote }}
+        emptyDir: {}
+      {{- end }}
       containers:
       - name: flux-helm-operator
         image: "{{ .Values.helmOperator.repository }}:{{ .Values.helmOperator.tag }}"
         imagePullPolicy: {{ .Values.helmOperator.pullPolicy }}
+        ports:
+        - name: http
+          containerPort: 3030
         volumeMounts:
+        {{- if .Values.ssh.known_hosts }}
         - name: sshdir
           mountPath: /root/.ssh/known_hosts
           subPath: known_hosts
           readOnly: true
+        {{- end }}
+        {{- if .Values.git.config.enabled }}
+        - name: git-config
+          mountPath: /root/.gitconfig
+          subPath: gitconfig
+          readOnly: true
+        {{- end }}
         - name: git-key
           mountPath: /etc/fluxd/ssh
           readOnly: true
@@ -80,17 +109,37 @@ spec:
           readOnly: true
         {{- end }}
         {{- end }}
+        {{- if .Values.helmOperator.configureRepositories.enable }}
+        - name: {{ .Values.helmOperator.configureRepositories.volumeName | quote }}
+          mountPath: /var/fluxd/helm/repository/repositories.yaml
+          subPath: repositories.yaml
+          readOnly: true
+        - name: {{ .Values.helmOperator.configureRepositories.cacheVolumeName | quote }}
+          mountPath: /var/fluxd/helm/repository/cache
+        {{- end }}
         args:
-        - --git-url={{ $gitURL }}
-        - --git-branch={{ $gitBranch }}
-        - --git-poll-interval={{ $gitPollInterval }}
+        {{- if .Values.logFormat }}
+        - --log-format={{ .Values.logFormat }}
+        {{end}}
         - --git-timeout={{ $gitTimeout }}
-        - --git-charts-path={{ .Values.helmOperator.git.chartsPath }}
+        - --git-poll-interval={{ $gitPollInterval }}
         - --charts-sync-interval={{ .Values.helmOperator.chartsSyncInterval }}
-        - --charts-sync-timeout={{ .Values.helmOperator.chartsSyncTimeout }}
         - --update-chart-deps={{ .Values.helmOperator.updateChartDeps }}
         - --log-release-diffs={{ .Values.helmOperator.logReleaseDiffs }}
+        {{- if .Values.helmOperator.workers }}
+        - --workers={{ .Values.helmOperator.workers }}
+        {{- end }}
+        {{- if not .Values.clusterRole.create }}
+        - --allow-namespace={{ .Release.Namespace }}
+        {{- else if .Values.helmOperator.allowNamespace }}
+        - --allow-namespace={{ .Values.helmOperator.allowNamespace }}
+        {{- end }}
+        {{- if .Values.helmOperator.tillerHost }}
+        - --tiller-ip={{ .Values.helmOperator.tillerHost }}
+        - --tiller-port={{ .Values.helmOperator.tillerPort }}
+        {{- else }}
         - --tiller-namespace={{ .Values.helmOperator.tillerNamespace }}
+        {{- end }}
         {{- if .Values.helmOperator.tls.enable }}
         - --tiller-tls-enable={{ .Values.helmOperator.tls.enable }}
         - --tiller-tls-key-path=/etc/fluxd/helm/{{ .Values.helmOperator.tls.keyFile }}
@@ -98,6 +147,9 @@ spec:
         {{- if .Values.helmOperator.tls.verify }}
         - --tiller-tls-verify={{ .Values.helmOperator.tls.verify }}
         - --tiller-tls-ca-cert-path=/etc/fluxd/helm-ca/ca.crt
+        {{- if .Values.helmOperator.tls.hostname }}
+        - --tiller-tls-hostname={{ .Values.helmOperator.tls.hostname }}
+        {{- end }}
         {{- end }}
         {{- end }}
       {{- if .Values.helmOperator.extraEnvs }}

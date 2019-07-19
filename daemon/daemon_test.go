@@ -13,20 +13,20 @@ import (
 
 	"github.com/go-kit/kit/log"
 	"github.com/stretchr/testify/assert"
-	"github.com/weaveworks/flux"
+
 	"github.com/weaveworks/flux/api/v10"
 	"github.com/weaveworks/flux/api/v11"
 	"github.com/weaveworks/flux/api/v6"
 	"github.com/weaveworks/flux/api/v9"
 	"github.com/weaveworks/flux/cluster"
 	"github.com/weaveworks/flux/cluster/kubernetes"
-	kresource "github.com/weaveworks/flux/cluster/kubernetes/resource"
-	"github.com/weaveworks/flux/cluster/kubernetes/testfiles"
+	"github.com/weaveworks/flux/cluster/mock"
 	"github.com/weaveworks/flux/event"
 	"github.com/weaveworks/flux/git"
 	"github.com/weaveworks/flux/git/gittest"
 	"github.com/weaveworks/flux/image"
 	"github.com/weaveworks/flux/job"
+	"github.com/weaveworks/flux/manifests"
 	"github.com/weaveworks/flux/policy"
 	"github.com/weaveworks/flux/registry"
 	registryMock "github.com/weaveworks/flux/registry/mock"
@@ -36,14 +36,14 @@ import (
 
 const (
 	// These have to match the values in cluster/kubernetes/testfiles/data.go
-	svc               = "default:deployment/helloworld"
+	wl                = "default:deployment/helloworld"
 	container         = "greeter"
 	ns                = "default"
 	oldHelloImage     = "quay.io/weaveworks/helloworld:3" // older in time but newer version!
 	newHelloImage     = "quay.io/weaveworks/helloworld:2"
 	currentHelloImage = "quay.io/weaveworks/helloworld:master-a000001"
 
-	anotherSvc       = "another:deployment/service"
+	anotherWl        = "another:deployment/service"
 	anotherContainer = "it-doesn't-matter"
 	anotherImage     = "another/service:latest"
 
@@ -51,10 +51,9 @@ const (
 	testVersion = "test"
 )
 
-var (
-	testBytes = []byte(`{}`)
-	timeout   = 5 * time.Second
-)
+var testBytes = []byte(`{}`)
+
+const timeout = 10 * time.Second
 
 // When I ping, I should get a response
 func TestDaemon_Ping(t *testing.T) {
@@ -100,8 +99,8 @@ func TestDaemon_Export(t *testing.T) {
 	}
 }
 
-// When I call list services, it should list all the services
-func TestDaemon_ListServices(t *testing.T) {
+// When I call list workloads, it should list all the workloads
+func TestDaemon_ListWorkloads(t *testing.T) {
 	d, start, clean, _, _, _ := mockDaemon(t)
 	start()
 	defer clean()
@@ -136,15 +135,15 @@ func TestDaemon_ListServices(t *testing.T) {
 	}
 }
 
-// When I call list services with options, it should list all the requested services
-func TestDaemon_ListServicesWithOptions(t *testing.T) {
+// When I call list workloads with options, it should list all the requested workloads
+func TestDaemon_ListWorkloadsWithOptions(t *testing.T) {
 	d, start, clean, _, _, _ := mockDaemon(t)
 	start()
 	defer clean()
 
 	ctx := context.Background()
 
-	t.Run("no filter", func (t *testing.T) {
+	t.Run("no filter", func(t *testing.T) {
 		s, err := d.ListServicesWithOptions(ctx, v11.ListServicesOptions{})
 		if err != nil {
 			t.Fatalf("Error: %s", err.Error())
@@ -153,10 +152,10 @@ func TestDaemon_ListServicesWithOptions(t *testing.T) {
 			t.Fatalf("Expected %v but got %v", 2, len(s))
 		}
 	})
-	t.Run("filter id", func (t *testing.T) {
+	t.Run("filter id", func(t *testing.T) {
 		s, err := d.ListServicesWithOptions(ctx, v11.ListServicesOptions{
 			Namespace: "",
-			Services:  []flux.ResourceID{flux.MustParseResourceID(svc)}})
+			Services:  []resource.ID{resource.MustParseID(wl)}})
 		if err != nil {
 			t.Fatalf("Error: %s", err.Error())
 		}
@@ -165,27 +164,26 @@ func TestDaemon_ListServicesWithOptions(t *testing.T) {
 		}
 	})
 
-	t.Run("filter id and namespace", func (t *testing.T) {
+	t.Run("filter id and namespace", func(t *testing.T) {
 		_, err := d.ListServicesWithOptions(ctx, v11.ListServicesOptions{
 			Namespace: "foo",
-			Services:  []flux.ResourceID{flux.MustParseResourceID(svc)}})
+			Services:  []resource.ID{resource.MustParseID(wl)}})
 		if err == nil {
 			t.Fatal("Expected error but got nil")
 		}
 	})
 
-	t.Run("filter unsupported id kind", func (t *testing.T) {
+	t.Run("filter unsupported id kind", func(t *testing.T) {
 		_, err := d.ListServicesWithOptions(ctx, v11.ListServicesOptions{
 			Namespace: "foo",
-			Services:  []flux.ResourceID{flux.MustParseResourceID("default:unsupportedkind/goodbyeworld")}})
+			Services:  []resource.ID{resource.MustParseID("default:unsupportedkind/goodbyeworld")}})
 		if err == nil {
 			t.Fatal("Expected error but got nil")
 		}
 	})
 }
 
-
-// When I call list images for a service, it should return images
+// When I call list images for a workload, it should return images
 func TestDaemon_ListImagesWithOptions(t *testing.T) {
 	d, start, clean, _, _, _ := mockDaemon(t)
 	start()
@@ -196,7 +194,7 @@ func TestDaemon_ListImagesWithOptions(t *testing.T) {
 	specAll := update.ResourceSpec(update.ResourceSpecAll)
 
 	// Service 1
-	svcID, err := flux.ParseResourceID(svc)
+	svcID, err := resource.ParseID(wl)
 	assert.NoError(t, err)
 	currentImageRef, err := image.ParseRef(currentHelloImage)
 	assert.NoError(t, err)
@@ -206,7 +204,7 @@ func TestDaemon_ListImagesWithOptions(t *testing.T) {
 	assert.NoError(t, err)
 
 	// Service 2
-	anotherSvcID, err := flux.ParseResourceID(anotherSvc)
+	anotherSvcID, err := resource.ParseID(anotherWl)
 	assert.NoError(t, err)
 	anotherImageRef, err := image.ParseRef(anotherImage)
 	assert.NoError(t, err)
@@ -264,7 +262,7 @@ func TestDaemon_ListImagesWithOptions(t *testing.T) {
 		},
 		{
 			name: "Specific service",
-			opts: v10.ListImagesOptions{Spec: update.ResourceSpec(svc)},
+			opts: v10.ListImagesOptions{Spec: update.ResourceSpec(wl)},
 			expectedImages: []v6.ImageStatus{
 				{
 					ID: svcID,
@@ -291,7 +289,7 @@ func TestDaemon_ListImagesWithOptions(t *testing.T) {
 		{
 			name: "Override container field selection",
 			opts: v10.ListImagesOptions{
-				Spec: specAll,
+				Spec:                    specAll,
 				OverrideContainerFields: []string{"Name", "Current", "NewAvailableImagesCount"},
 			},
 			expectedImages: []v6.ImageStatus{
@@ -321,8 +319,46 @@ func TestDaemon_ListImagesWithOptions(t *testing.T) {
 		{
 			name: "Override container field selection with invalid field",
 			opts: v10.ListImagesOptions{
-				Spec: specAll,
+				Spec:                    specAll,
 				OverrideContainerFields: []string{"InvalidField"},
+			},
+			expectedImages: nil,
+			shouldError:    true,
+		},
+		{
+			name: "Specific namespace",
+			opts: v10.ListImagesOptions{
+				Spec:      specAll,
+				Namespace: ns,
+			},
+			expectedImages: []v6.ImageStatus{
+				{
+					ID: svcID,
+					Containers: []v6.Container{
+						{
+							Name:           container,
+							Current:        image.Info{ID: currentImageRef},
+							LatestFiltered: image.Info{ID: newImageRef},
+							Available: []image.Info{
+								{ID: newImageRef},
+								{ID: currentImageRef},
+								{ID: oldImageRef},
+							},
+							AvailableImagesCount:    3,
+							NewAvailableImagesCount: 1,
+							FilteredImagesCount:     3,
+							NewFilteredImagesCount:  1,
+						},
+					},
+				},
+			},
+			shouldError: false,
+		},
+		{
+			name: "Specific namespace and service",
+			opts: v10.ListImagesOptions{
+				Spec:      update.ResourceSpec(wl),
+				Namespace: ns,
 			},
 			expectedImages: nil,
 			shouldError:    true,
@@ -358,9 +394,9 @@ func TestDaemon_NotifyChange(t *testing.T) {
 	ctx := context.Background()
 
 	var syncCalled int
-	var syncDef *cluster.SyncDef
+	var syncDef *cluster.SyncSet
 	var syncMu sync.Mutex
-	mockK8s.SyncFunc = func(def cluster.SyncDef) error {
+	mockK8s.SyncFunc = func(def cluster.SyncSet) error {
 		syncMu.Lock()
 		syncCalled++
 		syncDef = &def
@@ -385,8 +421,6 @@ func TestDaemon_NotifyChange(t *testing.T) {
 		t.Errorf("Sync was not called once, was called %d times", syncCalled)
 	} else if syncDef == nil {
 		t.Errorf("Sync was called with a nil syncDef")
-	} else if len(syncDef.Actions) != len(testfiles.ResourceMap) {
-		t.Errorf("Expected Sync called with %d actions (resources), was called with %d", len(testfiles.ResourceMap), len(syncDef.Actions))
 	}
 
 	// Check that history was written to
@@ -481,12 +515,12 @@ func TestDaemon_PolicyUpdate(t *testing.T) {
 			return false
 		}
 		defer co.Clean()
-		dirs := co.ManifestDirs()
-		m, err := d.Manifests.LoadManifests(co.Dir(), dirs)
+		cm := manifests.NewRawFiles(co.Dir(), co.ManifestDirs(), d.Manifests)
+		m, err := cm.GetAllResourcesByID(context.TODO())
 		if err != nil {
 			t.Fatalf("Error: %s", err.Error())
 		}
-		return len(m[svc].Policy()) > 0
+		return len(m[wl].Policies()) > 0
 	}, "Waiting for new annotation")
 }
 
@@ -538,12 +572,11 @@ func TestDaemon_JobStatusWithNoCache(t *testing.T) {
 
 func TestDaemon_Automated(t *testing.T) {
 	d, start, clean, k8s, _, _ := mockDaemon(t)
-	start()
 	defer clean()
 	w := newWait(t)
 
-	service := cluster.Controller{
-		ID: flux.MakeResourceID(ns, "deployment", "helloworld"),
+	workload := cluster.Workload{
+		ID: resource.MakeID(ns, "deployment", "helloworld"),
 		Containers: cluster.ContainersOrExcuse{
 			Containers: []resource.Container{
 				{
@@ -553,22 +586,22 @@ func TestDaemon_Automated(t *testing.T) {
 			},
 		},
 	}
-	k8s.SomeServicesFunc = func([]flux.ResourceID) ([]cluster.Controller, error) {
-		return []cluster.Controller{service}, nil
+	k8s.SomeWorkloadsFunc = func(ctx context.Context, ids []resource.ID) ([]cluster.Workload, error) {
+		return []cluster.Workload{workload}, nil
 	}
+	start()
 
 	// updates from helloworld:master-xxx to helloworld:2
-	w.ForImageTag(t, d, svc, container, "2")
+	w.ForImageTag(t, d, wl, container, "2")
 }
 
 func TestDaemon_Automated_semver(t *testing.T) {
 	d, start, clean, k8s, _, _ := mockDaemon(t)
-	start()
 	defer clean()
 	w := newWait(t)
 
-	resid := flux.MustParseResourceID("default:deployment/semver")
-	service := cluster.Controller{
+	resid := resource.MustParseID("default:deployment/semver")
+	workload := cluster.Workload{
 		ID: resid,
 		Containers: cluster.ContainersOrExcuse{
 			Containers: []resource.Container{
@@ -579,9 +612,10 @@ func TestDaemon_Automated_semver(t *testing.T) {
 			},
 		},
 	}
-	k8s.SomeServicesFunc = func([]flux.ResourceID) ([]cluster.Controller, error) {
-		return []cluster.Controller{service}, nil
+	k8s.SomeWorkloadsFunc = func(ctx context.Context, ids []resource.ID) ([]cluster.Workload, error) {
+		return []cluster.Workload{workload}, nil
 	}
+	start()
 
 	// helloworld:3 is older than helloworld:2 but semver orders by version
 	w.ForImageTag(t, d, resid.String(), container, "3")
@@ -599,11 +633,11 @@ func mustParseImageRef(ref string) image.Ref {
 	return r
 }
 
-func mockDaemon(t *testing.T) (*Daemon, func(), func(), *cluster.Mock, *mockEventWriter, func(func())) {
+func mockDaemon(t *testing.T) (*Daemon, func(), func(), *mock.Mock, *mockEventWriter, func(func())) {
 	logger := log.NewNopLogger()
 
-	singleService := cluster.Controller{
-		ID: flux.MustParseResourceID(svc),
+	singleService := cluster.Workload{
+		ID: resource.MustParseID(wl),
 		Containers: cluster.ContainersOrExcuse{
 			Containers: []resource.Container{
 				{
@@ -613,10 +647,10 @@ func mockDaemon(t *testing.T) (*Daemon, func(), func(), *cluster.Mock, *mockEven
 			},
 		},
 	}
-	multiService := []cluster.Controller{
+	multiService := []cluster.Workload{
 		singleService,
 		{
-			ID: flux.MakeResourceID("another", "deployment", "service"),
+			ID: resource.MakeID("another", "deployment", "service"),
 			Containers: cluster.ContainersOrExcuse{
 				Containers: []resource.Container{
 					{
@@ -637,33 +671,28 @@ func mockDaemon(t *testing.T) (*Daemon, func(), func(), *cluster.Mock, *mockEven
 		NotesRef:  "fluxtest",
 	}
 
-	var k8s *cluster.Mock
+	var k8s *mock.Mock
 	{
-		k8s = &cluster.Mock{}
-		k8s.AllServicesFunc = func(maybeNamespace string) ([]cluster.Controller, error) {
+		k8s = &mock.Mock{}
+		k8s.AllWorkloadsFunc = func(ctx context.Context, maybeNamespace string) ([]cluster.Workload, error) {
 			if maybeNamespace == ns {
-				return []cluster.Controller{
+				return []cluster.Workload{
 					singleService,
 				}, nil
 			} else if maybeNamespace == "" {
 				return multiService, nil
 			}
-			return []cluster.Controller{}, nil
+			return []cluster.Workload{}, nil
 		}
-		k8s.ExportFunc = func() ([]byte, error) { return testBytes, nil }
-		k8s.LoadManifestsFunc = kresource.Load
-		k8s.ParseManifestsFunc = func(allDefs []byte) (map[string]resource.Resource, error) {
-			return kresource.ParseMultidoc(allDefs, "test")
-		}
+		k8s.IsAllowedResourceFunc = func(resource.ID) bool { return true }
+		k8s.ExportFunc = func(ctx context.Context) ([]byte, error) { return testBytes, nil }
 		k8s.PingFunc = func() error { return nil }
-		k8s.SomeServicesFunc = func([]flux.ResourceID) ([]cluster.Controller, error) {
-			return []cluster.Controller{
+		k8s.SomeWorkloadsFunc = func(ctx context.Context, ids []resource.ID) ([]cluster.Workload, error) {
+			return []cluster.Workload{
 				singleService,
 			}, nil
 		}
-		k8s.SyncFunc = func(def cluster.SyncDef) error { return nil }
-		k8s.UpdatePoliciesFunc = (&kubernetes.Manifests{}).UpdatePolicies
-		k8s.UpdateImageFunc = (&kubernetes.Manifests{}).UpdateImage
+		k8s.SyncFunc = func(def cluster.SyncSet) error { return nil }
 	}
 
 	var imageRegistry registry.Registry
@@ -693,19 +722,21 @@ func mockDaemon(t *testing.T) (*Daemon, func(), func(), *cluster.Mock, *mockEven
 	// Jobs queue (starts itself)
 	jobs := job.NewQueue(jshutdown, jwg)
 
+	manifests := kubernetes.NewManifests(kubernetes.ConstNamespacer("default"), log.NewLogfmtLogger(os.Stdout))
+
 	// Finally, the daemon
 	d := &Daemon{
 		Repo:           repo,
 		GitConfig:      params,
 		Cluster:        k8s,
-		Manifests:      &kubernetes.Manifests{},
+		Manifests:      manifests,
 		Registry:       imageRegistry,
 		V:              testVersion,
 		Jobs:           jobs,
 		JobStatusCache: &job.StatusCache{Size: 100},
 		EventWriter:    events,
 		Logger:         logger,
-		LoopVars:       &LoopVars{},
+		LoopVars:       &LoopVars{GitTimeout: timeout},
 	}
 
 	start := func() {
@@ -818,22 +849,18 @@ func (w *wait) ForSyncStatus(d *Daemon, rev string, expectedNumCommits int) []st
 	return revs
 }
 
-func (w *wait) ForImageTag(t *testing.T, d *Daemon, service, container, tag string) {
+func (w *wait) ForImageTag(t *testing.T, d *Daemon, workload, container, tag string) {
 	w.Eventually(func() bool {
 		co, err := d.Repo.Clone(context.TODO(), d.GitConfig)
 		if err != nil {
 			return false
 		}
 		defer co.Clean()
-
-		dirs := co.ManifestDirs()
-		m, err := d.Manifests.LoadManifests(co.Dir(), dirs)
+		cm := manifests.NewRawFiles(co.Dir(), co.ManifestDirs(), d.Manifests)
+		resources, err := cm.GetAllResourcesByID(context.TODO())
 		assert.NoError(t, err)
 
-		resources, err := d.Manifests.ParseManifests(m[service].Bytes())
-		assert.NoError(t, err)
-
-		workload, ok := resources[service].(resource.Workload)
+		workload, ok := resources[workload].(resource.Workload)
 		assert.True(t, ok)
 		for _, c := range workload.Containers() {
 			if c.Name == container && c.Image.Tag == tag {
@@ -848,7 +875,7 @@ func (w *wait) ForImageTag(t *testing.T, d *Daemon, service, container, tag stri
 func updateImage(ctx context.Context, d *Daemon, t *testing.T) job.ID {
 	return updateManifest(ctx, t, d, update.Spec{
 		Type: update.Images,
-		Spec: update.ReleaseSpec{
+		Spec: update.ReleaseImageSpec{
 			Kind:         update.ReleaseKindExecute,
 			ServiceSpecs: []update.ResourceSpec{update.ResourceSpecAll},
 			ImageSpec:    newHelloImage,
@@ -859,8 +886,8 @@ func updateImage(ctx context.Context, d *Daemon, t *testing.T) job.ID {
 func updatePolicy(ctx context.Context, t *testing.T, d *Daemon) job.ID {
 	return updateManifest(ctx, t, d, update.Spec{
 		Type: update.Policy,
-		Spec: policy.Updates{
-			flux.MustParseResourceID("default:deployment/helloworld"): {
+		Spec: resource.PolicyUpdates{
+			resource.MustParseID("default:deployment/helloworld"): {
 				Add: policy.Set{
 					policy.Locked: "true",
 				},

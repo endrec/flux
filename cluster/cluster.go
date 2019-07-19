@@ -1,9 +1,10 @@
 package cluster
 
 import (
+	"context"
 	"errors"
 
-	"github.com/weaveworks/flux"
+	"github.com/weaveworks/flux/policy"
 	"github.com/weaveworks/flux/resource"
 	"github.com/weaveworks/flux/ssh"
 )
@@ -24,11 +25,12 @@ const (
 // are distinct interfaces.
 type Cluster interface {
 	// Get all of the services (optionally, from a specific namespace), excluding those
-	AllControllers(maybeNamespace string) ([]Controller, error)
-	SomeControllers([]flux.ResourceID) ([]Controller, error)
+	AllWorkloads(ctx context.Context, maybeNamespace string) ([]Workload, error)
+	SomeWorkloads(ctx context.Context, ids []resource.ID) ([]Workload, error)
+	IsAllowedResource(resource.ID) bool
 	Ping() error
-	Export() ([]byte, error)
-	Sync(SyncDef) error
+	Export(ctx context.Context) ([]byte, error)
+	Sync(SyncSet) error
 	PublicSSHKey(regenerate bool) (ssh.PublicKey, error)
 }
 
@@ -55,9 +57,9 @@ type RolloutStatus struct {
 	Messages []string
 }
 
-// Controller describes a cluster resource that declares versioned images.
-type Controller struct {
-	ID     flux.ResourceID
+// Workload describes a cluster resource that declares versioned images.
+type Workload struct {
+	ID     resource.ID
 	Status string // A status summary for display
 	// Is the controller considered read-only because it's under the
 	// control of the platform. In the case of Kubernetes, we simply
@@ -67,9 +69,13 @@ type Controller struct {
 	// resource through some mechanism (like an operator, or custom
 	// resource controller), we try to record the ID of that resource
 	// in this field.
-	Antecedent flux.ResourceID
+	Antecedent resource.ID
 	Labels     map[string]string
+	Policies   policy.Set
 	Rollout    RolloutStatus
+	// Errors during the recurring sync from the Git repository to the
+	// cluster will surface here.
+	SyncError error
 
 	Containers ContainersOrExcuse
 }
@@ -81,27 +87,14 @@ type ContainersOrExcuse struct {
 	Containers []resource.Container
 }
 
-func (s Controller) ContainersOrNil() []resource.Container {
+func (s Workload) ContainersOrNil() []resource.Container {
 	return s.Containers.Containers
 }
 
-func (s Controller) ContainersOrError() ([]resource.Container, error) {
+func (s Workload) ContainersOrError() ([]resource.Container, error) {
 	var err error
 	if s.Containers.Excuse != "" {
 		err = errors.New(s.Containers.Excuse)
 	}
 	return s.Containers.Containers, err
 }
-
-// These errors all represent logical problems with cluster
-// configuration, and may be recoverable; e.g., it might be fine if a
-// service does not have a matching RC/deployment.
-var (
-	ErrEmptySelector        = errors.New("empty selector")
-	ErrWrongResourceKind    = errors.New("new definition does not match existing resource")
-	ErrNoMatchingService    = errors.New("no matching service")
-	ErrServiceHasNoSelector = errors.New("service has no selector")
-	ErrNoMatching           = errors.New("no matching replication controllers or deployments")
-	ErrMultipleMatching     = errors.New("multiple matching replication controllers or deployments")
-	ErrNoMatchingImages     = errors.New("no matching images")
-)

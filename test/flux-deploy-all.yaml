@@ -36,7 +36,7 @@ spec:
   selector:
     name: memcached
 ---
-# Expose flux to fluxctl
+# Expose Flux to fluxctl
 apiVersion: v1
 kind: Service
 metadata:
@@ -76,7 +76,7 @@ spec:
       containers:
       - name: flux
         # Require locally built image
-        image: quay.io/weaveworks/flux:latest
+        image: docker.io/fluxcd/flux:latest
         imagePullPolicy: Never
         ports:
         - containerPort: 3030 # informational

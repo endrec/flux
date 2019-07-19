@@ -36,6 +36,22 @@ func NoCredentials() Credentials {
 	}
 }
 
+func parseAuth(auth string) (creds, error) {
+	decodedAuth, err := base64.StdEncoding.DecodeString(auth)
+	if err != nil {
+		return creds{}, err
+	}
+	authParts := strings.SplitN(string(decodedAuth), ":", 2)
+	if len(authParts) != 2 {
+		return creds{},
+			fmt.Errorf("decoded credential has wrong number of fields (expected 2, got %d)", len(authParts))
+	}
+	return creds{
+		username: authParts[0],
+		password: authParts[1],
+	}, nil
+}
+
 func ParseCredentials(from string, b []byte) (Credentials, error) {
 	var config struct {
 		Auths map[string]struct {
@@ -53,14 +69,13 @@ func ParseCredentials(from string, b []byte) (Credentials, error) {
 	}
 	m := map[string]creds{}
 	for host, entry := range config.Auths {
-		decodedAuth, err := base64.StdEncoding.DecodeString(entry.Auth)
+		creds, err := parseAuth(entry.Auth)
 		if err != nil {
 			return Credentials{}, err
 		}
-		authParts := strings.SplitN(string(decodedAuth), ":", 2)
-		if len(authParts) != 2 {
-			return Credentials{},
-				fmt.Errorf("decoded credential for %v has wrong number of fields (expected 2, got %d)", host, len(authParts))
+
+		if host == "http://" || host == "https://" {
+			return Credentials{}, errors.New("Empty registry auth url")
 		}
 
 		// Some users were passing in credentials in the form of
@@ -69,30 +84,24 @@ func ParseCredentials(from string, b []byte) (Credentials, error) {
 		// Also, the registry might be local and on a different port.
 		// So we need to check for that because url.Parse won't parse the ip:port format very well.
 		u, err := url.Parse(host)
-		if err != nil {
-			return Credentials{}, err
-		}
-		if u.Host == "" && u.Path == "" && !strings.Contains(host, ":") || host == "http://" || host == "https://" {
-			return Credentials{}, errors.New("Empty registry auth url")
-		}
-		if u.Host == "" { // If there's no https:// prefix, it won't parse the host.
+
+		// if anything went wrong try to prepend https://
+		if err != nil || u.Host == "" {
 			u, err = url.Parse(fmt.Sprintf("https://%s/", host))
 			if err != nil {
 				return Credentials{}, err
 			}
-			// If the host is still empty, then there's probably a rogue /
-			if u.Host == "" {
-				return Credentials{}, errors.New("Invalid registry auth url. Must be a valid http address (e.g. https://gcr.io/v1/)")
-			}
 		}
+
+		if u.Host == "" { // If host is still empty the url must be broken.
+			return Credentials{}, errors.New("Invalid registry auth url. Must be a valid http address (e.g. https://gcr.io/v1/)")
+		}
+
 		host = u.Host
 
-		m[host] = creds{
-			registry:   host,
-			provenance: from,
-			username:   authParts[0],
-			password:   authParts[1],
-		}
+		creds.registry = host
+		creds.provenance = from
+		m[host] = creds
 	}
 	return Credentials{m: m}, nil
 }
@@ -136,6 +145,13 @@ func (cs Credentials) credsFor(host string) creds {
 			return cred
 		}
 	}
+
+	if hostIsAzureContainerRegistry(host) {
+		if cred, err := getAzureCloudConfigAADToken(host); err == nil {
+			return cred
+		}
+	}
+
 	return creds{}
 }
 

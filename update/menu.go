@@ -7,7 +7,7 @@ import (
 	"io"
 	"text/tabwriter"
 
-	"github.com/weaveworks/flux"
+	"github.com/weaveworks/flux/resource"
 )
 
 const (
@@ -21,7 +21,7 @@ const (
 	glyphChecked   = "\u25c9"
 	glyphUnchecked = "\u25ef"
 
-	tableHeading = "CONTROLLER \tSTATUS \tUPDATES"
+	tableHeading = "WORKLOAD \tSTATUS \tUPDATES"
 )
 
 type writer struct {
@@ -69,8 +69,8 @@ func (c *writer) flush() error {
 }
 
 type menuItem struct {
-	id     flux.ResourceID
-	status ControllerUpdateStatus
+	id     resource.ID
+	status WorkloadUpdateStatus
 	error  string
 	update ContainerUpdate
 
@@ -100,8 +100,8 @@ func NewMenu(out io.Writer, results Result, verbosity int) *Menu {
 }
 
 func (m *Menu) fromResults(results Result, verbosity int) {
-	for _, serviceID := range results.ServiceIDs() {
-		resourceID := flux.MustParseResourceID(serviceID)
+	for _, workloadID := range results.WorkloadIDs() {
+		resourceID := resource.MustParseID(workloadID)
 		result := results[resourceID]
 		switch result.Status {
 		case ReleaseStatusIgnored:
@@ -147,8 +147,8 @@ func (m *Menu) AddItem(mi menuItem) {
 }
 
 // Run starts the interactive menu mode.
-func (m *Menu) Run() (map[flux.ResourceID][]ContainerUpdate, error) {
-	specs := make(map[flux.ResourceID][]ContainerUpdate)
+func (m *Menu) Run() (map[resource.ID][]ContainerUpdate, error) {
+	specs := make(map[resource.ID][]ContainerUpdate)
 	if m.selectable == 0 {
 		return specs, errors.New("No changes found.")
 	}
@@ -194,7 +194,7 @@ func (m *Menu) Run() (map[flux.ResourceID][]ContainerUpdate, error) {
 
 func (m *Menu) Print() {
 	m.wr.writeln(tableHeading)
-	var previd flux.ResourceID
+	var previd resource.ID
 	for _, item := range m.items {
 		inline := previd == item.id
 		m.wr.writeln(m.renderItem(item, inline))
@@ -207,7 +207,7 @@ func (m *Menu) printInteractive() {
 	m.wr.clear()
 	m.wr.writeln("    " + tableHeading)
 	i := 0
-	var previd flux.ResourceID
+	var previd resource.ID
 	for _, item := range m.items {
 		inline := previd == item.id
 		m.wr.writeln(m.renderInteractiveItem(item, inline, i))

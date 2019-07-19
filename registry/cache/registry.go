@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/pkg/errors"
+	"github.com/ryanuber/go-glob"
 
 	fluxerr "github.com/weaveworks/flux/errors"
 	"github.com/weaveworks/flux/image"
@@ -19,7 +20,7 @@ var (
 
 It takes time to initially cache all the images. Please wait.
 
-If you have waited for a long time, check the flux logs. Potential
+If you have waited for a long time, check the Flux logs. Potential
 reasons for the error are: no internet, no cache, error with the remote
 repository.
 `,
@@ -28,38 +29,78 @@ repository.
 
 // Cache is a local cache of image metadata.
 type Cache struct {
-	Reader Reader
+	Reader     Reader
+	Decorators []Decorator
 }
 
-// GetRepositoryImages returns the list of image manifests in an image
-// repository (e.g,. at "quay.io/weaveworks/flux")
-func (c *Cache) GetRepositoryImages(id image.Name) ([]image.Info, error) {
+// Decorator is for decorating an ImageRepository before it is returned.
+type Decorator interface {
+	apply(*ImageRepository)
+}
+
+// TimestampLabelWhitelist contains a string slice of glob patterns. Any
+// canonical image reference that matches one of the glob patterns will
+// prefer creation timestamps from labels over the one it received from
+// the registry.
+type TimestampLabelWhitelist []string
+
+// apply checks if any of the canonical image references from the
+// repository matches a glob pattern from the list. If it does, and the
+// image record has a valid timestamp label, it will replace the Created
+// field with the value from the label for all images in the repository.
+func (l TimestampLabelWhitelist) apply(r *ImageRepository) {
+	var match bool
+	for k, i := range r.Images {
+		if !match {
+			for _, exp := range l {
+				if glob.Glob(exp, i.ID.CanonicalName().String()) {
+					match = true
+					break
+				}
+			}
+			if !match {
+				return
+			}
+		}
+
+		switch {
+		case !i.Labels.Created.IsZero():
+			i.CreatedAt = i.Labels.Created
+		case !i.Labels.BuildDate.IsZero():
+			i.CreatedAt = i.Labels.BuildDate
+		}
+		r.Images[k] = i
+	}
+}
+
+// GetImageRepositoryMetadata returns the metadata from an image
+// repository (e.g,. at "docker.io/fluxcd/flux")
+func (c *Cache) GetImageRepositoryMetadata(id image.Name) (image.RepositoryMetadata, error) {
 	repoKey := NewRepositoryKey(id.CanonicalName())
 	bytes, _, err := c.Reader.GetKey(repoKey)
 	if err != nil {
-		return nil, err
+		return image.RepositoryMetadata{}, err
 	}
 	var repo ImageRepository
 	if err = json.Unmarshal(bytes, &repo); err != nil {
-		return nil, err
+		return image.RepositoryMetadata{}, err
 	}
 
 	// We only care about the error if we've never successfully
 	// updated the result.
 	if repo.LastUpdate.IsZero() {
 		if repo.LastError != "" {
-			return nil, errors.New(repo.LastError)
+			return image.RepositoryMetadata{}, errors.New(repo.LastError)
 		}
-		return nil, ErrNotCached
+		return image.RepositoryMetadata{}, ErrNotCached
 	}
 
-	images := make([]image.Info, len(repo.Images))
-	var i int
-	for _, im := range repo.Images {
-		images[i] = im
-		i++
+	// (Maybe) decorate the image repository.
+	for _, d := range c.Decorators {
+		d.apply(&repo)
 	}
-	return images, nil
+
+	return repo.RepositoryMetadata, nil
 }
 
 // GetImage gets the manifest of a specific image ref, from its
@@ -85,11 +126,11 @@ func (c *Cache) GetImage(id image.Ref) (image.Info, error) {
 // ImageRepository holds the last good information on an image
 // repository.
 //
-// Whenever we successfully fetch a full set of image info,
-// `LastUpdate` and `Images` shall each be assigned a value, and
+// Whenever we successfully fetch a set (partial or full) of image metadata,
+// `LastUpdate`, `Tags` and `Images` shall each be assigned a value, and
 // `LastError` will be cleared.
 //
-// If we cannot for any reason obtain a full set of image info,
+// If we cannot for any reason obtain the set of image metadata,
 // `LastError` shall be assigned a value, and the other fields left
 // alone.
 //
@@ -99,7 +140,7 @@ func (c *Cache) GetImage(id image.Ref) (image.Info, error) {
 // value (show the images, but also indicate there's a problem, for
 // example).
 type ImageRepository struct {
+	image.RepositoryMetadata
 	LastError  string
 	LastUpdate time.Time
-	Images     map[string]image.Info
 }

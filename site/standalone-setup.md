@@ -3,12 +3,20 @@ title: Customising the deployment
 menu_order: 20
 ---
 
-# Customising the deployment
+- [Customising the daemon configuration](#customising-the-daemon-configuration)
+  * [Connect Flux to a repository](#connect-flux-to-a-repository)
+  * [Flux deployment](#flux-deployment)
+  * [Add an SSH deploy key to the repository](#add-an-ssh-deploy-key-to-the-repository)
+    + [1. Allow Flux to generate a key for you.](#1-allow-flux-to-generate-a-key-for-you)
+    + [2. Specify a key to use](#2-specify-a-key-to-use)
+    + [Note for Kubernetes >=1.6 with role-based access control (RBAC)](#note-for-kubernetes-16-with-role-based-access-control-rbac)
+  * [Using a private git host](#using-a-private-git-host)
+  * [Memcache](#memcache)
+
+# Customising the daemon configuration
 
 The deployment installs Flux and its dependencies. First, change to
 the directory with the examples configuration.
-
-# Customising the daemon configuration
 
 ## Connect Flux to a repository
 
@@ -16,14 +24,6 @@ First, you need to connect Flux to the repository with Kubernetes
 manifests. This is achieved by setting the `--git-url` and
 `--git-branch` arguments in the
 [`flux-deployment.yaml`](../deploy/flux-deployment.yaml) manifest.
-
-## Memcache
-
-Flux uses memcache to cache docker registry requests.
-
-```sh
-kubectl create -f memcache-dep.yaml -f memcache-svc.yaml
-```
 
 ## Flux deployment
 
@@ -51,14 +51,30 @@ You have two options:
 ### 1. Allow Flux to generate a key for you.
 
 If you don't specify a key to use, Flux will create one for you. Obtain
-the public key through fluxctl:
+the public key through [fluxctl](./fluxctl.md):
+
+```sh
+fluxctl identity
+```
 
 ### 2. Specify a key to use
 
 Create a Kubernetes Secret from a private key:
 
 ```sh
-kubectl create secret generic flux-git-deploy --from-file=identity=/path/to/private_key
+kubectl create secret generic flux-git-deploy --from-file=identity=/full/path/to/private_key
+```
+
+this will result in a secret that has the structure:
+
+```yaml
+  apiVersion: v1
+  data:
+    identity: <base64 encoded RSA PRIVATE KEY>
+  kind: Secret
+  type: Opaque
+  metadata:
+    ...
 ```
 
 The Kubernetes deployment configuration file
@@ -91,7 +107,7 @@ by removing the deploy key.
 
 If you're using your own git host -- e.g., your own installation of
 gitlab, or bitbucket server -- you will need to add its host key to
-`~/.ssh/known_hosts` in the flux daemon container.
+`~/.ssh/known_hosts` in the Flux daemon container.
 
 First, run a check that you can clone the repo. The following assumes
 that your git server's hostname (e.g., `githost`) is in `$GITHOST` and
@@ -174,3 +190,11 @@ metadata:
 You will need to explicitly tell fluxd to use that service account by
 uncommenting and possible adapting the line `# serviceAccountName:
 flux` in the file `fluxd-deployment.yaml` before applying it.
+
+## Memcache
+
+Flux uses memcache to cache docker registry requests.
+
+```sh
+kubectl create -f memcache-dep.yaml -f memcache-svc.yaml
+```

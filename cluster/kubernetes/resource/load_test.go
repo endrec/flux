@@ -8,7 +8,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"github.com/weaveworks/flux"
 	"github.com/weaveworks/flux/cluster/kubernetes/testfiles"
 	"github.com/weaveworks/flux/resource"
 )
@@ -121,6 +120,39 @@ data:
 	}
 }
 
+func TestParseBoundaryMarkers(t *testing.T) {
+	doc := `---
+kind: ConfigMap
+metadata:
+  name: bigmap
+---
+...
+---
+...
+---
+...
+---
+...
+`
+	buffer := bytes.NewBufferString(doc)
+
+	resources, err := ParseMultidoc(buffer.Bytes(), "test")
+	assert.NoError(t, err)
+	assert.Len(t, resources, 1)
+}
+
+func TestParseError(t *testing.T) {
+	doc := `---
+kind: ConfigMap
+metadata:
+	name: bigmap # contains a tab at the beginning
+`
+	buffer := bytes.NewBufferString(doc)
+
+	_, err := ParseMultidoc(buffer.Bytes(), "test")
+	assert.Error(t, err)
+}
+
 func TestParseCronJob(t *testing.T) {
 	doc := `---
 apiVersion: batch/v1beta1
@@ -161,9 +193,11 @@ items:
 - kind: Deployment
   metadata:
     name: foo
+    namespace: ns
 - kind: Service
   metadata:
     name: bar
+    namespace: ns
 `
 	res, err := unmarshalObject("", []byte(doc))
 	if err != nil {
@@ -176,9 +210,44 @@ items:
 	if len(list.Items) != 2 {
 		t.Fatalf("expected two items, got %+v", list.Items)
 	}
-	for i, id := range []flux.ResourceID{
-		flux.MustParseResourceID("default:deployment/foo"),
-		flux.MustParseResourceID("default:service/bar")} {
+	for i, id := range []resource.ID{
+		resource.MustParseID("ns:deployment/foo"),
+		resource.MustParseID("ns:service/bar")} {
+		if list.Items[i].ResourceID() != id {
+			t.Errorf("At %d, expected %q, got %q", i, id, list.Items[i].ResourceID())
+		}
+	}
+}
+
+func TestUnmarshalDeploymentList(t *testing.T) {
+	doc := `---
+kind: DeploymentList
+metadata:
+  name: list
+items:
+- kind: Deployment
+  metadata:
+    name: foo
+    namespace: ns
+- kind: Deployment
+  metadata:
+    name: bar
+    namespace: ns
+`
+	res, err := unmarshalObject("", []byte(doc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	list, ok := res.(*List)
+	if !ok {
+		t.Fatal("did not parse as a list")
+	}
+	if len(list.Items) != 2 {
+		t.Fatalf("expected two items, got %+v", list.Items)
+	}
+	for i, id := range []resource.ID{
+		resource.MustParseID("ns:deployment/foo"),
+		resource.MustParseID("ns:deployment/bar")} {
 		if list.Items[i].ResourceID() != id {
 			t.Errorf("At %d, expected %q, got %q", i, id, list.Items[i].ResourceID())
 		}

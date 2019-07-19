@@ -2,10 +2,11 @@ package update
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 
 	"github.com/go-kit/kit/log"
-	"github.com/weaveworks/flux"
+
 	"github.com/weaveworks/flux/image"
 	"github.com/weaveworks/flux/resource"
 )
@@ -15,22 +16,26 @@ type Automated struct {
 }
 
 type Change struct {
-	ServiceID flux.ResourceID
-	Container resource.Container
-	ImageID   image.Ref
+	WorkloadID resource.ID
+	Container  resource.Container
+	ImageID    image.Ref
 }
 
-func (a *Automated) Add(service flux.ResourceID, container resource.Container, image image.Ref) {
+func (a *Automated) Add(service resource.ID, container resource.Container, image image.Ref) {
 	a.Changes = append(a.Changes, Change{service, container, image})
 }
 
-func (a *Automated) CalculateRelease(rc ReleaseContext, logger log.Logger) ([]*ControllerUpdate, Result, error) {
-	prefilters := []ControllerFilter{
-		&IncludeFilter{a.serviceIDs()},
+func (a *Automated) CalculateRelease(ctx context.Context, rc ReleaseContext, logger log.Logger) ([]*WorkloadUpdate, Result, error) {
+	prefilters := []WorkloadFilter{
+		&IncludeFilter{a.workloadIDs()},
+	}
+	postfilters := []WorkloadFilter{
+		&LockedFilter{},
+		&IgnoreFilter{},
 	}
 
 	result := Result{}
-	updates, err := rc.SelectServices(result, prefilters, nil)
+	updates, err := rc.SelectWorkloads(ctx, result, prefilters, postfilters)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -73,9 +78,9 @@ func (a *Automated) CommitMessage(result Result) string {
 }
 
 func (a *Automated) markSkipped(results Result) {
-	for _, v := range a.serviceIDs() {
+	for _, v := range a.workloadIDs() {
 		if _, ok := results[v]; !ok {
-			results[v] = ControllerResult{
+			results[v] = WorkloadResult{
 				Status: ReleaseStatusSkipped,
 				Error:  NotInRepo,
 			}
@@ -83,13 +88,13 @@ func (a *Automated) markSkipped(results Result) {
 	}
 }
 
-func (a *Automated) calculateImageUpdates(rc ReleaseContext, candidates []*ControllerUpdate, result Result, logger log.Logger) ([]*ControllerUpdate, error) {
-	updates := []*ControllerUpdate{}
+func (a *Automated) calculateImageUpdates(rc ReleaseContext, candidates []*WorkloadUpdate, result Result, logger log.Logger) ([]*WorkloadUpdate, error) {
+	updates := []*WorkloadUpdate{}
 
-	serviceMap := a.serviceMap()
+	workloadMap := a.workloadMap()
 	for _, u := range candidates {
 		containers := u.Resource.Containers()
-		changes := serviceMap[u.ResourceID]
+		changes := workloadMap[u.ResourceID]
 		containerUpdates := []ContainerUpdate{}
 		for _, container := range containers {
 			currentImageID := container.Image
@@ -118,12 +123,12 @@ func (a *Automated) calculateImageUpdates(rc ReleaseContext, candidates []*Contr
 		if len(containerUpdates) > 0 {
 			u.Updates = containerUpdates
 			updates = append(updates, u)
-			result[u.ResourceID] = ControllerResult{
+			result[u.ResourceID] = WorkloadResult{
 				Status:       ReleaseStatusSuccess,
 				PerContainer: containerUpdates,
 			}
 		} else {
-			result[u.ResourceID] = ControllerResult{
+			result[u.ResourceID] = WorkloadResult{
 				Status: ReleaseStatusSkipped,
 				Error:  ImageUpToDate,
 			}
@@ -133,19 +138,19 @@ func (a *Automated) calculateImageUpdates(rc ReleaseContext, candidates []*Contr
 	return updates, nil
 }
 
-// serviceMap transposes the changes so they can be looked up by ID
-func (a *Automated) serviceMap() map[flux.ResourceID][]Change {
-	set := map[flux.ResourceID][]Change{}
+// workloadMap transposes the changes so they can be looked up by ID
+func (a *Automated) workloadMap() map[resource.ID][]Change {
+	set := map[resource.ID][]Change{}
 	for _, change := range a.Changes {
-		set[change.ServiceID] = append(set[change.ServiceID], change)
+		set[change.WorkloadID] = append(set[change.WorkloadID], change)
 	}
 	return set
 }
 
-func (a *Automated) serviceIDs() []flux.ResourceID {
-	slice := []flux.ResourceID{}
-	for service, _ := range a.serviceMap() {
-		slice = append(slice, flux.MustParseResourceID(service.String()))
+func (a *Automated) workloadIDs() []resource.ID {
+	slice := []resource.ID{}
+	for workload, _ := range a.workloadMap() {
+		slice = append(slice, resource.MustParseID(workload.String()))
 	}
 	return slice
 }

@@ -16,7 +16,7 @@ We need to clone a git repo to proceed, and you haven't supplied
 one. Please upload a config file, including a git repository URL, as
 described in
 
-    https://github.com/weaveworks/flux/blob/master/site/using.md
+    https://github.com/weaveworks/flux/blob/master/site/fluxctl.md
 
 `,
 }
@@ -48,7 +48,7 @@ cross-check with the fingerprint given by
 func ErrUpstreamNotWritable(url string, actual error) error {
 	help := `Could not write to upstream repository
 
-To keep track of synchronisation, the flux daemon must be able to
+To keep track of synchronisation, the Flux daemon must be able to
 write to the upstream git repository.
 `
 	if strings.HasPrefix(url, "http://") ||

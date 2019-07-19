@@ -1,11 +1,46 @@
 ---
-title: Weave Flux FAQ
+title: Flux FAQ
 menu_order: 60
 ---
 
+- [General questions](#general-questions)
+  * [What does Flux do?](#what-does-flux-do)
+  * [How does it automate deployment?](#how-does-it-automate-deployment)
+  * [How is that different from a bash script?](#how-is-that-different-from-a-bash-script)
+  * [Why should I automate deployment?](#why-should-i-automate-deployment)
+  * [I thought Flux was about service routing?](#i-thought-flux-was-about-service-routing)
+  * [Are there prerelease builds I can run?](#are-there-prerelease-builds-i-can-run)
+- [Technical questions](#technical-questions)
+  * [Does it work only with one git repository?](#does-it-work-only-with-one-git-repository)
+  * [Do I have to put my application code and config in the same git repo?](#do-i-have-to-put-my-application-code-and-config-in-the-same-git-repo)
+  * [Is there any special directory layout I need in my git repo?](#is-there-any-special-directory-layout-i-need-in-my-git-repo)
+  * [Why does Flux need a git ssh key with write access?](#why-does-flux-need-a-git-ssh-key-with-write-access)
+  * [Does Flux automatically sync changes back to git?](#does-flux-automatically-sync-changes-back-to-git)
+  * [Will Flux delete resources when I remove them from git?](#will-flux-delete-resources-when-i-remove-them-from-git)
+  * [How do I give Flux access to an image registry?](#how-do-i-give-flux-access-to-an-image-registry)
+  * [How often does Flux check for new images?](#how-often-does-flux-check-for-new-images)
+  * [How often does Flux check for new git commits (and can I make it sync faster)?](#how-often-does-flux-check-for-new-git-commits-and-can-i-make-it-sync-faster)
+  * [How do I use my own deploy key?](#how-do-i-use-my-own-deploy-key)
+  * [How do I use a private git host (or one that's not github.com, gitlab.com, bitbucket.org, dev.azure.com, or vs-ssh.visualstudio.com)?](#how-do-i-use-a-private-git-host-or-one-thats-not-githubcom-gitlabcom-bitbucketorg-devazurecom-or-vs-sshvisualstudiocom)
+  * [Why does my CI pipeline keep getting triggered?](#why-does-my-ci-pipeline-keep-getting-triggered)
+  * [Can I restrict the namespaces that Flux can see or operate on?](#can-i-restrict-the-namespaces-that-flux-can-see-or-operate-on)
+  * [Can I change the namespace Flux puts things in by default?](#can-i-change-the-namespace-flux-puts-things-in-by-default)
+  * [Can I temporarily make Flux ignore a deployment?](#can-i-temporarily-make-flux-ignore-a-deployment)
+  * [How can I prevent Flux overriding the replicas when using HPA?](#how-can-i-prevent-flux-overriding-the-replicas-when-using-hpa)
+  * [Can I disable Flux registry scanning?](#can-i-disable-flux-registry-scanning)
+  * [Does Flux support Kustomize/My favorite manifest factorization technology?](#does-flux-support-kustomizetemplatingmy-favorite-manifest-factorization-technology)
+- [Flux Helm Operator questions](#flux-helm-operator-questions)
+  * [I'm using SSL between Helm and Tiller. How can I configure Flux to use the certificate?](#im-using-ssl-between-helm-and-tiller-how-can-i-configure-flux-to-use-the-certificate)
+  * [I've deleted a HelmRelease file from Git. Why is the Helm release still running on my cluster?](#ive-deleted-a-helmrelease-file-from-git-why-is-the-helm-release-still-running-on-my-cluster)
+  * [I've manually deleted a Helm release. Why is Flux not able to restore it?](#ive-manually-deleted-a-helm-release-why-is-flux-not-able-to-restore-it)
+  * [I have a dedicated Kubernetes cluster per environment and I want to use the same Git repo for all. How can I do that?](#i-have-a-dedicated-kubernetes-cluster-per-environment-and-i-want-to-use-the-same-git-repo-for-all-how-can-i-do-that)
+
 ## General questions
 
-Also see [the introduction](/site/introduction.md).
+Also see
+
+- [the introduction](/site/introduction.md) for Flux's design principles
+- [the troubleshooting section](/site/troubleshooting.md)
 
 ### What does Flux do?
 
@@ -46,12 +81,12 @@ There are some pretty good solutions for service routing:
 [Envoy](https://www.envoyproxy.io/), [Istio](https://istio.io) for
 example. We may return to the matter of staged deployments.
 
-### Are there nightly builds I can run?
+### Are there prerelease builds I can run?
 
 There are builds from CI for each merge to master branch. See
-[quay.io/weaveworks/flux](https://quay.io/repository/weaveworks/flux?tab=tags)
+[weaveworks/flux-prerelease](https://hub.docker.com/r/weaveworks/flux-prerelease/tags)
 and
-[quay.io/weaveworks/helm-operator](https://quay.io/repository/weaveworks/helm-operator?tag=latest&tab=tags).
+[weaveworks/helm-operator-prerelease](https://hub.docker.com/r/weaveworks/helm-operator-prerelease/tags).
 
 ## Technical questions
 
@@ -85,7 +120,7 @@ built).
 ### Is there any special directory layout I need in my git repo?
 
 Nope. Flux doesn't place any significance on the directory structure,
-and will descend into subdirectories in search of YAMLs. It avoids
+and will descend into subdirectories in search of YAMLs. Although [kubectl works with JSON files](https://kubernetes.io/docs/concepts/configuration/overview/#using-kubectl), Flux will ignore JSON. It avoids
 directories that look like Helm charts.
 
 If you have YAML files in the repo that _aren't_ for applying to
@@ -101,15 +136,29 @@ applying the command. This is done to ensure that git remains the single source 
 
 For example, if you use the following `fluxctl` command:
 
-    fluxctl release --controller=deployment/foo --update-image=bar:v2
+```sh
+fluxctl release --controller=deployment/foo --update-image=bar:v2
+```
 
 The image tag will be updated in the git repository upon applying the command.
 
-For more information about Flux commands see [the fluxctl docs](./using.md).
+For more information about Flux commands see [the fluxctl docs](./fluxctl.md).
 
 ### Does Flux automatically sync changes back to git?
 
 No. It applies changes to git only when a Flux command or API call makes them.
+
+### Will Flux delete resources when I remove them from git?
+
+Flux has an experimental (for now) garbage collection feature,
+enabled by passing the command-line flag `--sync-garbage-collection`
+to fluxd.
+
+The garbage collection is conservative: it is designed to not delete
+resources that were not created by fluxd. This means it will sometimes
+_not_ delete resources that _were_ created by fluxd, when
+reconfigured. Read more about garbage collection
+[here](./garbagecollection.md).
 
 ### How do I give Flux access to an image registry?
 
@@ -124,19 +173,17 @@ There are exceptions:
  - One way of supplying credentials in Kubernetes is to put them on each
    node; Flux does not have access to those credentials.
  - In some environments, authorisation provided by the platform is
-   used instead of image pull secrets. Google Container Registry works
-   this way, for example (and we have introduced a special case for it
-   so Flux will work there too). See below regarding ECR.
+   used instead of image pull secrets:
+    - Google Container Registry works this way; Flux will
+      automatically attempt to use platform-provided credentials when
+      scanning images in GCR.
+    - Amazon Elastic Container Registry (ECR) has its own
+      authentication using IAM. If your worker nodes can read from
+      ECR, then Flux will be able to access it too.
 
-To work around the exceptional cases, you can mount a docker config into
-the Flux container. See the argument `--docker-config` in
-[the daemon arguments reference](https://github.com/weaveworks/flux/blob/master/site/daemon.md#flags).
-
-For ECR (Elastic Container Registry), the credentials supplied by the
-environment are rotated, so it's not possible to supply a file with
-credentials ahead of time. See
-[weaveworks/flux#539](https://github.com/weaveworks/flux/issues/539) for
-workarounds.
+To work around exceptional cases, you can mount a docker config into
+the Flux container. See the argument `--docker-config` in [the daemon
+arguments reference](daemon.md#flags).
 
 See also
 [Why are my images not showing up in the list of images?](#why-are-my-images-not-showing-up-in-the-list-of-images)
@@ -195,88 +242,31 @@ First delete the secret (if it exists):
 
 `kubectl delete secret flux-git-deploy`
 
-Then create a new secret named `flux-git-deploy`, using your key as the content of the secret:
+Then create a new secret named `flux-git-deploy`, using your private key as the content of the secret (you can generate the key with `ssh-keygen -q -N "" -f /full/path/to/private_key`):
 
-`kubectl create secret generic flux-git-deploy --from-file=identity=/full/path/to/key`
+`kubectl create secret generic flux-git-deploy --from-file=identity=/full/path/to/private_key`
 
 Now restart fluxd to re-read the k8s secret (if it is running):
 
 `kubectl delete $(kubectl get pod -o name -l name=flux)`
 
-### Why are my images not showing up in the list of images?
+If you have installed flux through Helm, make sure to pass 
+`--set git.secretName=flux-git-deploy` when installing/upgrading the chart.
 
-Sometimes, instead of seeing the various images and their tags, the
-output of `fluxctl list-images` (or the UI in Weave Cloud, if you're
-using that) shows nothing. There's a number of reasons this can
-happen:
-
- - Flux just hasn't fetched the image metadata yet. This may be the case
-   if you've only just started using a particular image in a workload.
- - Flux can't get suitable credentials for the image repository. At
-   present, it looks at `imagePullSecret`s attached to workloads (but
-   not to service accounts; see
-   [weaveworks/flux#1043](https://github.com/weaveworks/flux/issues/1043)),
-   and a Docker config file if you mount one into the fluxd container
-   (see the [command-line usage](./daemon.md)).
- - Flux doesn't know how to obtain registry credentials for ECR. A
-   workaround is described in
-   [weaveworks/flux#539](https://github.com/weaveworks/flux/issues/539#issuecomment-394588423)
- - Flux doesn't yet understand what to do with image repositories that
-   have images for more than one architecture; see
-   [weaveworks/flux#741](https://github.com/weaveworks/flux/issues/741). At
-   present there's no workaround for this, if you are not in control
-   of the image repository in question (or you are, but you need to
-   have multi-arch manifests).
- - Flux doesn't yet examine `initContainer`s when cataloguing the
-   images used by workloads. See
-   [weaveworks/flux#702](https://github.com/weaveworks/flux/issues/702)
- - Flux doesn't yet understand image refs that use digests instead of
-   tags; see
-   [weaveworks/flux#885](https://github.com/weaveworks/flux/issues/885).
-
-If none of these explanations seem to apply, please
-[file an issue](https://github.com/weaveworks/flux/issues/new).
-
-### Why do my image tags appear out of order?
-
-You may notice that the ordering given to image tags does not always
-correspond with the order in which you pushed the images. That's
-because Flux sorts them by the image creation time; and, if you have
-retagged an older image, the creation time won't correspond to when
-you pushed the image. (Why does Flux look at the image creation time?
-In general there is no way for Flux to retrieve the time at which a
-tag was pushed from an image registry.)
-
-This can happen if you explicitly tag an image that already
-exists. Because of the way Docker shares image layers, it can also
-happen _implicitly_ if you happen to build an image that is identical
-to an existing image.
-
-If this appears to be a problem for you, one way to ensure each image
-build has its own creation time is to label it with a build time;
-e.g., using
-[OpenContainers pre-defined annotations](https://github.com/opencontainers/image-spec/blob/master/annotations.md#pre-defined-annotation-keys).
-
-### How do I use a private git host (or one that's not github.com, gitlab.com, or bitbucket.org)?
+### How do I use a private git host (or one that's not github.com, gitlab.com, bitbucket.org, dev.azure.com, or vs-ssh.visualstudio.com)?
 
 As part of using git+ssh securely from the Flux daemon, we make sure
 `StrictHostKeyChecking` is on in the
 [SSH config](http://man7.org/linux/man-pages/man5/ssh_config.5.html). This
 mitigates against man-in-the-middle attacks.
 
-We bake host keys for `github.com`, `gitlab.com`, and `bitbucket.org`
+We bake host keys for `github.com`, `gitlab.com`, `bitbucket.org`, `dev.azure.com`, and `vs-ssh.visualstudio.com`
 into the image to cover some common cases. If you're using another
 service, or running your own git host, you need to supply your own
 host key(s).
 
 How to do this is documented in
 [standalone-setup.md](/site/standalone-setup.md#using-a-private-git-host).
-
-### Will Flux delete resources that are no longer in the git repository?
-
-Not at present. It's tricky to come up with a safe and unsurprising
-way for this to work. There's discussion of some possibilities in
-[weaveworks/flux#738](https://github.com/weaveworks/flux/issues/738).
 
 ### Why does my CI pipeline keep getting triggered?
 
@@ -286,9 +276,9 @@ The first is that Flux pushes commits to your git repo, and if that
 repo is configured to go through CI, usually those commits will
 trigger a build. You can avoid this by supplying the flag `--ci-skip`
 so that Flux's commit will append `[ci skip]` to its commit
-messages. Many CI system will treat that as meaning they should not
+messages. Many CI systems will treat that as meaning they should not
 run a build for that commit. You can use `--ci-skip-message`, if you
-need a different piece of text appened to commit messages.
+need a different piece of text appended to commit messages.
 
 The other thing that can trigger CI is that Flux pushes a tag to the
 upstream git repo whenever it has applied new commits. This acts as a
@@ -304,20 +294,8 @@ Here's the relevant docs for some common CI systems:
  - [CircleCI](https://circleci.com/docs/2.0/workflows/#git-tag-job-execution)
  - [TravisCI](https://docs.travis-ci.com/user/customizing-the-build#Building-Specific-Branches)
  - [GitLab](https://docs.gitlab.com/ee/ci/yaml/#only-and-except-simplified)
-
-### What is the "sync tag"; or, why do I see a `flux-sync` tag in my git repo?
-
-Flux keeps track of the last commit that it's applied to the cluster,
-by pushing a tag (controlled by the command-line flags
-`--git-sync-tag` and `--git-label`) to the git repository. This gives
-it a persistent high water mark, so even if it is restarted from
-scratch, it will be able to tell where it got to.
-
-Technically, it only needs this to be able to determine which image
-releases (including automated upgrades) it has applied, and that only
-matters if it has been asked to report those with the `--connect`
-flag. Future versions of Flux may be more sparing in use of the sync
-tag.
+ - [Bitbucket Pipelines](https://confluence.atlassian.com/bitbucket/configure-bitbucket-pipelines-yml-792298910.html#Configurebitbucket-pipelines.yml-ci_defaultdefault)
+ - [Azure Pipelines](https://docs.microsoft.com/en-us/azure/devops/pipelines/index?view=azure-devops)
 
 ### Can I restrict the namespaces that Flux can see or operate on?
 
@@ -331,7 +309,7 @@ to experiment to find the most restrictive permissions that work for
 your case.
 
 You will need to use the (experimental) command-line flag
-`--k8s-namespace-whitelist` to enumerate the namespaces that Flux
+`--k8s-allow-namespace` to enumerate the namespaces that Flux
 attempts to scan for workloads.
 
 ### Can I change the namespace Flux puts things in by default?
@@ -351,7 +329,7 @@ places (the `volume`, `volumeMount`, and `env` entries).
 The easiest way to create a suitable "kubeconfig" will be to adapt the
 [file that is baked into the image](../docker/kubeconfig). Save that
 locally as `my-kubeconfig`, edit it to change the default namespace,
-then create the configmap, in the same namespace you run flux in, with
+then create the configmap, in the same namespace you run Flux in, with
 something like:
 
     kubectl create configmap flux-kubeconfig --from-file=config=./my-kubeconfig
@@ -402,6 +380,50 @@ only returns the kinds of resource mentioned above. So,
 annotating a running resource only works if it's one of those
 kinds; putting the annotation in the file always works.
 
+### How can I prevent Flux overriding the replicas when using HPA?
+
+When using a horizontal pod autoscaler you have to remove the `spec.replicas` from your deployment definition.
+If the replicas field is not present in Git, Flux will not override the replica count set by the HPA.
+
+### Can I disable Flux registry scanning?
+
+You can exclude images from being scanned by providing a list of glob expressions using the `registry-exclude-image` flag.
+
+Exclude images from Docker Hub and Quay.io:
+
+```
+--registry-exclude-image=docker.io/*,quay.io/*
+```
+
+And the Helm install equivalent (note the `\,` separator):
+
+```
+--set registry.excludeImage="docker.io/*\,quay.io/*"
+```
+
+Exclude images containing `test` in the FQN:
+
+```
+--registry-exclude-image=*test*
+```
+
+Disable image scanning for all images:
+
+```
+--registry-exclude-image=*
+```
+
+### Does Flux support Kustomize/Templating/My favorite manifest factorization technology?
+
+Yes!
+
+Flux experimentally supports technology-agnostic manifest factorization through
+`.flux.yaml` configuration files placed in the Git repository. To enable this
+feature please supply `fluxd` with flag `--manifest-generation=true`.
+
+See [`.flux.yaml` configuration files documentation](/site/fluxyaml-config-files.md) for
+further details.
+
 ## Flux Helm Operator questions
 
 ### I'm using SSL between Helm and Tiller. How can I configure Flux to use the certificate?
@@ -409,13 +431,13 @@ kinds; putting the annotation in the file always works.
 When installing Flux, you can supply the CA and client-side certificate using the `helmOperator.tls` options,
 more details [here](https://github.com/weaveworks/flux/blob/master/chart/flux/README.md#installing-weave-flux-helm-operator-and-helm-with-tls-enabled).
 
-### I've deleted a FluxHelmRelease file from Git. Why is the Helm release still running on my cluster?
+### I've deleted a HelmRelease file from Git. Why is the Helm release still running on my cluster?
 
 Flux doesn't delete resources, there is an [issue](https://github.com/weaveworks/flux/issues/738) opened about this topic on GitHub.
 In order to delete a Helm release first remove the file from Git and afterwards run:
 
 ```yaml
-kubectl delete fluxhelmrelease/my-release
+kubectl delete helmrelease/my-release
 ```
 
 The Flux Helm operator will receive the delete event and will purge the Helm release.
@@ -425,24 +447,19 @@ The Flux Helm operator will receive the delete event and will purge the Helm rel
 If you delete a Helm release with `helm delete my-release`, the release name can't be reused.
 You need to use the `helm delete --purge` option only then Flux will be able reinstall a release.
 
-### I've uninstalled Flux and all my Helm releases are gone. Why is that?
-
-On `FluxHelmRelease` CRD deletion, Kubernetes will remove all `FluxHelmRelease` CRs triggering a Helm purge for each release created by Flux.
-To avoid this you have to manually delete the Flux Helm Operator with `kubectl -n flux delete deployment/flux-helm-operator` before running `helm delete flux`.
-
 ### I have a dedicated Kubernetes cluster per environment and I want to use the same Git repo for all. How can I do that?
 
-For each cluster create a Git branch in your config repo. When installing Flux set the Git branch using `--set git.branch=cluster-name`
+*Option 1*
+For each cluster create a directory in your config repo.
+When installing Flux Helm chart set the Git path using `--set git.path=k8s/cluster-name`
 and set a unique label for each cluster `--set git.label=cluster-name`.
 
-### I have a dedicated Git repo for my Helm charts. How can I point Flux Helm Operator to it?
+You can have one or more shared dirs between clusters. Assuming your shared dir is located
+at `k8s/common` set the Git path as `--set git.path="k8s/common\,k8s/cluster-name"`.
 
-When installing Flux with Helm you can override the Operator Git settings using `--set helmOperator.git.url=`.
+*Option 2*
+For each cluster create a Git branch in your config repo.
+When installing Flux Helm chart set the Git branch using `--set git.branch=cluster-name`
+and set a unique label for each cluster `--set git.label=cluster-name`.
 
-If you are using GitHub you need to create a SSH key for Helm Operator:
 
-* generate a SSH key named identity: `ssh-keygen -q -N "" -f ./identity`
-* create a Kubernetes secret: `kubectl -n flux create secret generic helm-ssh --from-file=./identity`
-* delete the private key: `rm ./identity`
-* add `./identity.pub` as a read-only deployment key in your GitHub repo where the charts are
-* set the secret name with `--set helmOperator.git.secretName=helm-ssh`

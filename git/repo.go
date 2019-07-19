@@ -2,6 +2,7 @@ package git
 
 import (
 	"errors"
+	"fmt"
 	"io/ioutil"
 	"os"
 	"sync"
@@ -44,14 +45,10 @@ const (
 	RepoReady    GitRepoStatus = "ready"        // has been written to, so ready to sync
 )
 
-// Remote points at a git repo somewhere.
-type Remote struct {
-	URL string // clone from here
-}
-
 type Repo struct {
 	// As supplied to constructor
 	origin   Remote
+	branch   string
 	interval time.Duration
 	timeout  time.Duration
 	readonly bool
@@ -86,6 +83,12 @@ type Timeout time.Duration
 
 func (t Timeout) apply(r *Repo) {
 	r.timeout = time.Duration(t)
+}
+
+type Branch string
+
+func (b Branch) apply(r *Repo) {
+	r.branch = string(b)
 }
 
 var ReadOnly optionFunc = func(r *Repo) {
@@ -205,6 +208,16 @@ func (r *Repo) Revision(ctx context.Context, ref string) (string, error) {
 	return refRevision(ctx, r.dir, ref)
 }
 
+// BranchHead returns the HEAD revision (SHA1) of the configured branch
+func (r *Repo) BranchHead(ctx context.Context) (string, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if err := r.errorIfNotReady(); err != nil {
+		return "", err
+	}
+	return refRevision(ctx, r.dir, "heads/"+r.branch)
+}
+
 func (r *Repo) CommitsBefore(ctx context.Context, ref string, paths ...string) ([]Commit, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -221,6 +234,24 @@ func (r *Repo) CommitsBetween(ctx context.Context, ref1, ref2 string, paths ...s
 		return nil, err
 	}
 	return onelinelog(ctx, r.dir, ref1+".."+ref2, paths)
+}
+
+func (r *Repo) VerifyTag(ctx context.Context, tag string) (string, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if err := r.errorIfNotReady(); err != nil {
+		return "", err
+	}
+	return verifyTag(ctx, r.dir, tag)
+}
+
+func (r *Repo) VerifyCommit(ctx context.Context, commit string) error {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if err := r.errorIfNotReady(); err != nil {
+		return err
+	}
+	return verifyCommit(ctx, r.dir, commit)
 }
 
 // step attempts to advance the repo state machine, and returns `true`
@@ -266,10 +297,23 @@ func (r *Repo) step(bg context.Context) bool {
 		return false
 
 	case RepoCloned:
+		ctx, cancel := context.WithTimeout(bg, r.timeout)
+		defer cancel()
+
+		if r.branch != "" {
+			ok, err := refExists(ctx, dir, "refs/heads/"+r.branch)
+			if err != nil {
+				r.setUnready(RepoCloned, err)
+				return false
+			}
+			if !ok {
+				r.setUnready(RepoCloned, fmt.Errorf("configured branch '%s' does not exist", r.branch))
+				return false
+			}
+		}
+
 		if !r.readonly {
-			ctx, cancel := context.WithTimeout(bg, r.timeout)
-			err := checkPush(ctx, dir, url)
-			cancel()
+			err := checkPush(ctx, dir, url, r.branch)
 			if err != nil {
 				r.setUnready(RepoCloned, err)
 				return false

@@ -1,10 +1,10 @@
 ---
-title: How Weave Flux Works
+title: How Flux Works
 menu_order: 20
 ---
 
-This page describes the goals of flux, how it achieves them and 
-significant architectural decisions. It is intentionally high level 
+This page describes the goals of flux, how it achieves them and
+significant architectural decisions. It is intentionally high level
 to prevent it from being out of date too quickly.
 
 # Goals
@@ -23,9 +23,9 @@ with an orchestrator (which is a common source of accidental failure) or
 with the systems that ensure that the orchestrator is in a working
 state.
 
-Flux also provides a CLI and a UI (in Weave Cloud) to perform these
-operations manually. Flux is flexible enough to fit into any development
-process.
+Flux provides a CLI ([`fluxctl`](fluxctl.md)) to perform these
+operations manually. Flux is flexible enough to fit into any
+development process.
 
 # Implementation Overview
 
@@ -70,27 +70,14 @@ In order to access private registries, credentials may be required.
 
 ## Deployment of Images
 
-Flux will only deploy different images. It will not re-deploy images 
+Flux will only deploy different images. It will not re-deploy images
 with the same tag.
 
-Once a list of new images have been established, it will alter the 
+Once a list of new images have been established, it will alter the
 configuration of the cluster to deploy the new images.
 
 Images can be "locked" to a specific version. "locked" images won't be
 updated by automated or manual means.
-
-# Weave Cloud only
-
-## Slack integration
-
-Flux integrates with Slack. A Slack API endpoint is required.
-
-Flux will announce to slack when changes have occured.
-
-## Auditing
-
-Flux also exposes the history of its actions for auditing
-purposes. You can see every event that has happened on the cluster.
 
 ## Next
 

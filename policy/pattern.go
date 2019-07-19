@@ -1,17 +1,19 @@
 package policy
 
 import (
+	"regexp"
+	"strings"
+
 	"github.com/Masterminds/semver"
 	"github.com/ryanuber/go-glob"
 	"github.com/weaveworks/flux/image"
-	"strings"
-	"regexp"
 )
 
 const (
-	globPrefix   = "glob:"
-	semverPrefix = "semver:"
-	regexpPrefix = "regexp:"
+	globPrefix      = "glob:"
+	semverPrefix    = "semver:"
+	regexpPrefix    = "regexp:"
+	regexpAltPrefix = "regex:"
 )
 
 var (
@@ -30,6 +32,8 @@ type Pattern interface {
 	Newer(a, b *image.Info) bool
 	// Valid returns true if the pattern is considered valid.
 	Valid() bool
+	// RequiresTimestamp returns true if the pattern orders based on timestamp data.
+	RequiresTimestamp() bool
 }
 
 type GlobPattern string
@@ -43,8 +47,8 @@ type SemverPattern struct {
 
 // RegexpPattern matches by regular expression.
 type RegexpPattern struct {
-	pattern	string // pattern without prefix
-	regexp	*regexp.Regexp
+	pattern string // pattern without prefix
+	regexp  *regexp.Regexp
 }
 
 // NewPattern instantiates a Pattern according to the prefix
@@ -58,6 +62,10 @@ func NewPattern(pattern string) Pattern {
 		return SemverPattern{pattern, c}
 	case strings.HasPrefix(pattern, regexpPrefix):
 		pattern = strings.TrimPrefix(pattern, regexpPrefix)
+		r, _ := regexp.Compile(pattern)
+		return RegexpPattern{pattern, r}
+	case strings.HasPrefix(pattern, regexpAltPrefix):
+		pattern = strings.TrimPrefix(pattern, regexpAltPrefix)
 		r, _ := regexp.Compile(pattern)
 		return RegexpPattern{pattern, r}
 	default:
@@ -78,6 +86,10 @@ func (g GlobPattern) Newer(a, b *image.Info) bool {
 }
 
 func (g GlobPattern) Valid() bool {
+	return true
+}
+
+func (g GlobPattern) RequiresTimestamp() bool {
 	return true
 }
 
@@ -105,6 +117,10 @@ func (s SemverPattern) Valid() bool {
 	return s.constraints != nil
 }
 
+func (s SemverPattern) RequiresTimestamp() bool {
+	return false
+}
+
 func (r RegexpPattern) Matches(tag string) bool {
 	if r.regexp == nil {
 		// Invalid regexp match anything
@@ -123,4 +139,8 @@ func (r RegexpPattern) Newer(a, b *image.Info) bool {
 
 func (r RegexpPattern) Valid() bool {
 	return r.regexp != nil
+}
+
+func (r RegexpPattern) RequiresTimestamp() bool {
+	return true
 }

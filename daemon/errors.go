@@ -2,10 +2,17 @@ package daemon
 
 import (
 	"fmt"
+	"sync"
 
 	fluxerr "github.com/weaveworks/flux/errors"
 	"github.com/weaveworks/flux/job"
+	"github.com/weaveworks/flux/resource"
 )
+
+type SyncErrors struct {
+	errs map[resource.ID]error
+	mu   sync.Mutex
+}
 
 func manifestLoadError(reason error) error {
 	return &fluxerr.Error{
@@ -57,6 +64,24 @@ daemon if possible:
 
     https://github.com/weaveworks/flux/issues
 
+`,
+	}
+}
+
+func unsignedHeadRevisionError(latestValidRevision, headRevision string) error {
+	return &fluxerr.Error{
+		Type: fluxerr.User,
+		Err:  fmt.Errorf("HEAD revision is unsigned"),
+		Help: `HEAD is not a verified commit.
+
+The branch HEAD in the git repo is not verified, and fluxd is unable to
+make a change on top of it. The last verified commit was
+
+    ` + latestValidRevision + `
+
+HEAD is 
+
+    ` + headRevision + `.
 `,
 	}
 }

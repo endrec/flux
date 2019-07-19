@@ -2,54 +2,47 @@ package kubernetes
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 
-	k8syaml "github.com/ghodss/yaml"
 	"github.com/go-kit/kit/log"
 	"github.com/pkg/errors"
-	fhrclient "github.com/weaveworks/flux/integrations/client/clientset/versioned"
 	"gopkg.in/yaml.v2"
 	apiv1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/discovery"
+	k8sclientdynamic "k8s.io/client-go/dynamic"
 	k8sclient "k8s.io/client-go/kubernetes"
 
-	"github.com/weaveworks/flux"
 	"github.com/weaveworks/flux/cluster"
-	"github.com/weaveworks/flux/resource"
+	kresource "github.com/weaveworks/flux/cluster/kubernetes/resource"
+	fhrclient "github.com/weaveworks/flux/integrations/client/clientset/versioned"
 	"github.com/weaveworks/flux/ssh"
+	"github.com/weaveworks/flux/resource"
 )
 
 type coreClient k8sclient.Interface
+type dynamicClient k8sclientdynamic.Interface
 type fluxHelmClient fhrclient.Interface
+type discoveryClient discovery.DiscoveryInterface
 
-type extendedClient struct {
+type ExtendedClient struct {
 	coreClient
+	dynamicClient
 	fluxHelmClient
+	discoveryClient
 }
 
-// --- internal types for keeping track of syncing
-
-type metadata struct {
-	Name      string `yaml:"name"`
-	Namespace string `yaml:"namespace"`
-}
-
-type apiObject struct {
-	resource.Resource
-	Kind     string   `yaml:"kind"`
-	Metadata metadata `yaml:"metadata"`
-}
-
-// A convenience for getting an minimal object from some bytes.
-func parseObj(def []byte) (*apiObject, error) {
-	obj := apiObject{}
-	return &obj, yaml.Unmarshal(def, &obj)
-}
-
-func (o *apiObject) hasNamespace() bool {
-	return o.Metadata.Namespace != ""
+func MakeClusterClientset(core coreClient, dyn dynamicClient, fluxhelm fluxHelmClient, disco discoveryClient) ExtendedClient {
+	return ExtendedClient{
+		coreClient:      core,
+		dynamicClient:   dyn,
+		fluxHelmClient:  fluxhelm,
+		discoveryClient: disco,
+	}
 }
 
 // --- add-ons
@@ -67,6 +60,7 @@ func (o *apiObject) hasNamespace() bool {
 // Kubernetes metadata. These methods are implemented by the
 // Kubernetes API resource types.
 type k8sObject interface {
+	GetName() string
 	GetNamespace() string
 	GetLabels() map[string]string
 	GetAnnotations() map[string]string
@@ -90,36 +84,40 @@ func isAddon(obj k8sObject) bool {
 // Cluster is a handle to a Kubernetes API server.
 // (Typically, this code is deployed into the same cluster.)
 type Cluster struct {
-	client     extendedClient
-	applier    Applier
+	// Do garbage collection when syncing resources
+	GC bool
+	// dry run garbage collection without syncing
+	DryGC bool
+
+	client  ExtendedClient
+	applier Applier
+
 	version    string // string response for the version command.
 	logger     log.Logger
 	sshKeyRing ssh.KeyRing
 
-	nsWhitelist       []string
-	nsWhitelistLogged map[string]bool // to keep track of whether we've logged a problem with seeing a whitelisted ns
+	// syncErrors keeps a record of all per-resource errors during
+	// the sync from Git repo to the cluster.
+	syncErrors   map[resource.ID]error
+	muSyncErrors sync.RWMutex
 
-	mu sync.Mutex
+	allowedNamespaces []string
+	loggedAllowedNS   map[string]bool // to keep track of whether we've logged a problem with seeing an allowed namespace
+
+	imageExcludeList []string
+	mu               sync.Mutex
 }
 
 // NewCluster returns a usable cluster.
-func NewCluster(clientset k8sclient.Interface,
-	fluxHelmClientset fhrclient.Interface,
-	applier Applier,
-	sshKeyRing ssh.KeyRing,
-	logger log.Logger,
-	nsWhitelist []string) *Cluster {
-
+func NewCluster(client ExtendedClient, applier Applier, sshKeyRing ssh.KeyRing, logger log.Logger, allowedNamespaces []string, imageExcludeList []string) *Cluster {
 	c := &Cluster{
-		client: extendedClient{
-			clientset,
-			fluxHelmClientset,
-		},
+		client:            client,
 		applier:           applier,
 		logger:            logger,
 		sshKeyRing:        sshKeyRing,
-		nsWhitelist:       nsWhitelist,
-		nsWhitelistLogged: map[string]bool{},
+		allowedNamespaces: allowedNamespaces,
+		loggedAllowedNS:   map[string]bool{},
+		imageExcludeList:  imageExcludeList,
 	}
 
 	return c
@@ -127,109 +125,93 @@ func NewCluster(clientset k8sclient.Interface,
 
 // --- cluster.Cluster
 
-// SomeControllers returns the controllers named, missing out any that don't
-// exist in the cluster. They do not necessarily have to be returned
-// in the order requested.
-func (c *Cluster) SomeControllers(ids []flux.ResourceID) (res []cluster.Controller, err error) {
-	var controllers []cluster.Controller
+// SomeWorkloads returns the workloads named, missing out any that don't
+// exist in the cluster or aren't in an allowed namespace.
+// They do not necessarily have to be returned in the order requested.
+func (c *Cluster) SomeWorkloads(ctx context.Context, ids []resource.ID) (res []cluster.Workload, err error) {
+	var workloads []cluster.Workload
 	for _, id := range ids {
+		if !c.IsAllowedResource(id) {
+			continue
+		}
 		ns, kind, name := id.Components()
 
 		resourceKind, ok := resourceKinds[kind]
 		if !ok {
-			return nil, fmt.Errorf("Unsupported kind %v", kind)
+			c.logger.Log("warning", "unsupported kind", "resource", id)
+			continue
 		}
 
-		podController, err := resourceKind.getPodController(c, ns, name)
+		workload, err := resourceKind.getWorkload(ctx, c, ns, name)
 		if err != nil {
+			if apierrors.IsForbidden(err) || apierrors.IsNotFound(err) {
+				continue
+			}
 			return nil, err
 		}
 
-		if !isAddon(podController) {
-			controllers = append(controllers, podController.toClusterController(id))
+		if !isAddon(workload) {
+			c.muSyncErrors.RLock()
+			workload.syncError = c.syncErrors[id]
+			c.muSyncErrors.RUnlock()
+			workloads = append(workloads, workload.toClusterWorkload(id))
 		}
 	}
-	return controllers, nil
+	return workloads, nil
 }
 
-// AllControllers returns all controllers matching the criteria; that is, in
+// AllWorkloads returns all workloads in allowed namespaces matching the criteria; that is, in
 // the namespace (or any namespace if that argument is empty)
-func (c *Cluster) AllControllers(namespace string) (res []cluster.Controller, err error) {
-	namespaces, err := c.getAllowedNamespaces()
+func (c *Cluster) AllWorkloads(ctx context.Context, namespace string) (res []cluster.Workload, err error) {
+	namespaces, err := c.getAllowedAndExistingNamespaces(ctx)
 	if err != nil {
 		return nil, errors.Wrap(err, "getting namespaces")
 	}
 
-	var allControllers []cluster.Controller
+	var allworkloads []cluster.Workload
 	for _, ns := range namespaces {
 		if namespace != "" && ns.Name != namespace {
 			continue
 		}
 
 		for kind, resourceKind := range resourceKinds {
-			podControllers, err := resourceKind.getPodControllers(c, ns.Name)
+			workloads, err := resourceKind.getWorkloads(ctx, c, ns.Name)
 			if err != nil {
-				if se, ok := err.(*apierrors.StatusError); ok && se.ErrStatus.Reason == meta_v1.StatusReasonNotFound {
+				switch {
+				case apierrors.IsNotFound(err):
 					// Kind not supported by API server, skip
 					continue
-				} else {
+				case apierrors.IsForbidden(err):
+					// K8s can return forbidden instead of not found for non super admins
+					c.logger.Log("warning", "not allowed to list resources", "err", err)
+					continue
+				default:
 					return nil, err
 				}
 			}
 
-			for _, podController := range podControllers {
-				if !isAddon(podController) {
-					id := flux.MakeResourceID(ns.Name, kind, podController.name)
-					allControllers = append(allControllers, podController.toClusterController(id))
+			for _, workload := range workloads {
+				if !isAddon(workload) {
+					id := resource.MakeID(ns.Name, kind, workload.GetName())
+					c.muSyncErrors.RLock()
+					workload.syncError = c.syncErrors[id]
+					c.muSyncErrors.RUnlock()
+					allworkloads = append(allworkloads, workload.toClusterWorkload(id))
 				}
 			}
 		}
 	}
 
-	return allControllers, nil
+	return allworkloads, nil
 }
 
-// Sync performs the given actions on resources. Operations are
-// asynchronous, but serialised.
-func (c *Cluster) Sync(spec cluster.SyncDef) error {
-	logger := log.With(c.logger, "method", "Sync")
-
-	cs := makeChangeSet()
-	var errs cluster.SyncError
-	for _, action := range spec.Actions {
-		stages := []struct {
-			res resource.Resource
-			cmd string
-		}{
-			{action.Delete, "delete"},
-			{action.Apply, "apply"},
-		}
-		for _, stage := range stages {
-			if stage.res == nil {
-				continue
-			}
-			obj, err := parseObj(stage.res.Bytes())
-			if err == nil {
-				obj.Resource = stage.res
-				cs.stage(stage.cmd, obj)
-			} else {
-				errs = append(errs, cluster.ResourceError{Resource: stage.res, Error: err})
-				break
-			}
-		}
+func (c *Cluster) setSyncErrors(errs cluster.SyncError) {
+	c.muSyncErrors.Lock()
+	defer c.muSyncErrors.Unlock()
+	c.syncErrors = make(map[resource.ID]error)
+	for _, e := range errs {
+		c.syncErrors[e.ResourceID] = e.Error
 	}
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if applyErrs := c.applier.apply(logger, cs); len(applyErrs) > 0 {
-		errs = append(errs, applyErrs...)
-	}
-
-	// If `nil`, errs is a cluster.SyncError(nil) rather than error(nil)
-	if errs != nil {
-		return errs
-	}
-	return nil
 }
 
 func (c *Cluster) Ping() error {
@@ -238,34 +220,45 @@ func (c *Cluster) Ping() error {
 }
 
 // Export exports cluster resources
-func (c *Cluster) Export() ([]byte, error) {
+func (c *Cluster) Export(ctx context.Context) ([]byte, error) {
 	var config bytes.Buffer
 
-	namespaces, err := c.getAllowedNamespaces()
+	namespaces, err := c.getAllowedAndExistingNamespaces(ctx)
 	if err != nil {
 		return nil, errors.Wrap(err, "getting namespaces")
 	}
 
+	encoder := yaml.NewEncoder(&config)
+	defer encoder.Close()
+
 	for _, ns := range namespaces {
-		err := appendYAML(&config, "v1", "Namespace", ns)
+		// kind & apiVersion must be set, since TypeMeta is not populated
+		ns.Kind = "Namespace"
+		ns.APIVersion = "v1"
+		err := encoder.Encode(yamlThroughJSON{ns})
 		if err != nil {
 			return nil, errors.Wrap(err, "marshalling namespace to YAML")
 		}
 
 		for _, resourceKind := range resourceKinds {
-			podControllers, err := resourceKind.getPodControllers(c, ns.Name)
+			workloads, err := resourceKind.getWorkloads(ctx, c, ns.Name)
 			if err != nil {
-				if se, ok := err.(*apierrors.StatusError); ok && se.ErrStatus.Reason == meta_v1.StatusReasonNotFound {
+				switch {
+				case apierrors.IsNotFound(err):
 					// Kind not supported by API server, skip
 					continue
-				} else {
+				case apierrors.IsForbidden(err):
+					// K8s can return forbidden instead of not found for non super admins
+					c.logger.Log("warning", "not allowed to list resources", "err", err)
+					continue
+				default:
 					return nil, err
 				}
 			}
 
-			for _, pc := range podControllers {
+			for _, pc := range workloads {
 				if !isAddon(pc) {
-					if err := appendYAML(&config, pc.apiVersion, pc.kind, pc.k8sObject); err != nil {
+					if err := encoder.Encode(yamlThroughJSON{pc.k8sObject}); err != nil {
 						return nil, err
 					}
 				}
@@ -273,22 +266,6 @@ func (c *Cluster) Export() ([]byte, error) {
 		}
 	}
 	return config.Bytes(), nil
-}
-
-// kind & apiVersion must be passed separately as the object's TypeMeta is not populated
-func appendYAML(buffer *bytes.Buffer, apiVersion, kind string, object interface{}) error {
-	yamlBytes, err := k8syaml.Marshal(object)
-	if err != nil {
-		return err
-	}
-	buffer.WriteString("---\n")
-	buffer.WriteString("apiVersion: ")
-	buffer.WriteString(apiVersion)
-	buffer.WriteString("\nkind: ")
-	buffer.WriteString(kind)
-	buffer.WriteString("\n")
-	buffer.Write(yamlBytes)
-	return nil
 }
 
 func (c *Cluster) PublicSSHKey(regenerate bool) (ssh.PublicKey, error) {
@@ -301,24 +278,27 @@ func (c *Cluster) PublicSSHKey(regenerate bool) (ssh.PublicKey, error) {
 	return publicKey, nil
 }
 
-// getAllowedNamespaces returns a list of namespaces that the Flux instance is expected
-// to have access to and can look for resources inside of.
-// It returns a list of all namespaces unless a namespace whitelist has been set on the Cluster
-// instance, in which case it returns a list containing the namespaces from the whitelist
-// that exist in the cluster.
-func (c *Cluster) getAllowedNamespaces() ([]apiv1.Namespace, error) {
-	if len(c.nsWhitelist) > 0 {
+// getAllowedAndExistingNamespaces returns a list of existing namespaces that
+// the Flux instance is expected to have access to and can look for resources inside of.
+// It returns a list of all namespaces unless an explicit list of allowed namespaces
+// has been set on the Cluster instance.
+func (c *Cluster) getAllowedAndExistingNamespaces(ctx context.Context) ([]apiv1.Namespace, error) {
+	if len(c.allowedNamespaces) > 0 {
 		nsList := []apiv1.Namespace{}
-		for _, name := range c.nsWhitelist {
+		for _, name := range c.allowedNamespaces {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			ns, err := c.client.CoreV1().Namespaces().Get(name, meta_v1.GetOptions{})
 			switch {
 			case err == nil:
-				c.nsWhitelistLogged[name] = false // reset, so if the namespace goes away we'll log it again
+				c.loggedAllowedNS[name] = false // reset, so if the namespace goes away we'll log it again
 				nsList = append(nsList, *ns)
 			case apierrors.IsUnauthorized(err) || apierrors.IsForbidden(err) || apierrors.IsNotFound(err):
-				if !c.nsWhitelistLogged[name] {
-					c.logger.Log("warning", "whitelisted namespace inaccessible", "namespace", name, "err", err)
-					c.nsWhitelistLogged[name] = true
+				if !c.loggedAllowedNS[name] {
+					c.logger.Log("warning", "cannot access allowed namespace",
+						"namespace", name, "err", err)
+					c.loggedAllowedNS[name] = true
 				}
 			default:
 				return nil, err
@@ -327,9 +307,54 @@ func (c *Cluster) getAllowedNamespaces() ([]apiv1.Namespace, error) {
 		return nsList, nil
 	}
 
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	namespaces, err := c.client.CoreV1().Namespaces().List(meta_v1.ListOptions{})
 	if err != nil {
 		return nil, err
 	}
 	return namespaces.Items, nil
+}
+
+func (c *Cluster) IsAllowedResource(id resource.ID) bool {
+	if len(c.allowedNamespaces) == 0 {
+		// All resources are allowed when all namespaces are allowed
+		return true
+	}
+
+	namespace, kind, name := id.Components()
+	namespaceToCheck := namespace
+
+	if namespace == kresource.ClusterScope {
+		// All cluster-scoped resources (not namespaced) are allowed ...
+		if kind != "namespace" {
+			return true
+		}
+		// ... except namespaces themselves, whose name needs to be explicitly allowed
+		namespaceToCheck = name
+	}
+
+	for _, allowedNS := range c.allowedNamespaces {
+		if namespaceToCheck == allowedNS {
+			return true
+		}
+	}
+	return false
+}
+
+type yamlThroughJSON struct {
+	toMarshal interface{}
+}
+
+func (y yamlThroughJSON) MarshalYAML() (interface{}, error) {
+	rawJSON, err := json.Marshal(y.toMarshal)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling into JSON: %s", err)
+	}
+	var jsonObj interface{}
+	if err = yaml.Unmarshal(rawJSON, &jsonObj); err != nil {
+		return nil, fmt.Errorf("error unmarshaling from JSON: %s", err)
+	}
+	return jsonObj, nil
 }

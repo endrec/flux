@@ -1,43 +1,34 @@
 ---
-title: Building Weave Flux
+title: Building Flux
 menu_order: 80
 ---
 
 # Build
 
-You'll need a working `go` environment (official releases are build against `1.10`),
-including the [`dep`](https://github.com/golang/dep#installation) tool.
-
+You'll need a working `go` environment version >= 1.11 (official releases are built against `1.12`).
 It's also expected that you have a Docker daemon for building images.
 
-Ensure the repository is checked out into $GOPATH/src/github.com/weaveworks/flux.
-Then, from the root,
+Clone the respository. The project uses Go Modules, so if you explicitly define `$GOPATH` you should
+clone somewhere else
 
-```
-$ 
-$ dep ensure
-# .. time passes ..
+Then, from the root directory,
+
+```sh
 $ make
 ```
 
-This makes Docker images, and installs binaries to $GOPATH/bin.
+This makes Docker images, and installs binaries to `$GOBIN` (if you define it) or `$(go env GOPATH)/bin`.
+
+Note: The default target architecture is amd64. If you would like to try to build Docker images
+and binaries for a different architecture you will have to set ARCH variable,
+
+```sh
+$ make ARCH=<target_arch>
+```
 
 # Test
 
-```
+```sh
 $ make test
 ```
 
-# Dependency management
-
-We use [dep](https://github.com/golang/dep) to manage vendored dependencies.
-Note that **we do not check in the dependencies**.
-
-To get all the dependencies put in the `vendor/` folder, use
-
-```
-$ dep ensure
-```
-
-If you see a big diff or other unexpected output after running `dep ensure`,
-make sure you're using the latest official release of `dep`.

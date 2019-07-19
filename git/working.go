@@ -20,8 +20,10 @@ type Config struct {
 	NotesRef    string
 	UserName    string
 	UserEmail   string
+	SigningKey  string
 	SetAuthor   bool
 	SkipMessage string
+	GitSecret   bool
 }
 
 // Checkout is a local working clone of the remote repo. It is
@@ -35,14 +37,23 @@ type Checkout struct {
 }
 
 type Commit struct {
-	Revision string
-	Message  string
+	Signature Signature
+	Revision  string
+	Message   string
 }
 
 // CommitAction - struct holding commit information
 type CommitAction struct {
-	Author  string
-	Message string
+	Author     string
+	Message    string
+	SigningKey string
+}
+
+// TagAction - struct holding tag information
+type TagAction struct {
+	Revision   string
+	Message    string
+	SigningKey string
 }
 
 // Clone returns a local working clone of the sync'ed `*Repo`, using
@@ -72,12 +83,30 @@ func (r *Repo) Clone(ctx context.Context, conf Config) (*Checkout, error) {
 	}
 
 	r.mu.RLock()
+	// Here is where we mimic `git fetch --tags --force`, but
+	// _without_ overwriting head refs. This is only required for a
+	// `Checkout` and _not_ for `Repo` as (bare) mirrors will happily
+	// accept any ref changes to tags.
+	//
+	// NB: do this before any other fetch actions, as otherwise we may
+	// get an 'existing tag clobber' error back.
+	if err := fetch(ctx, repoDir, r.dir, `'+refs/tags/*:refs/tags/*'`); err != nil {
+		os.RemoveAll(repoDir)
+		r.mu.RUnlock()
+		return nil, err
+	}
 	if err := fetch(ctx, repoDir, r.dir, realNotesRef+":"+realNotesRef); err != nil {
 		os.RemoveAll(repoDir)
 		r.mu.RUnlock()
 		return nil, err
 	}
 	r.mu.RUnlock()
+
+	if conf.GitSecret {
+		if err := secretUnseal(ctx, repoDir); err != nil {
+			return nil, err
+		}
+	}
 
 	return &Checkout{
 		dir:          repoDir,
@@ -116,19 +145,28 @@ func (c *Checkout) ManifestDirs() []string {
 
 // CommitAndPush commits changes made in this checkout, along with any
 // extra data as a note, and pushes the commit and note to the remote repo.
-func (c *Checkout) CommitAndPush(ctx context.Context, commitAction CommitAction, note interface{}) error {
-	if !check(ctx, c.dir, c.config.Paths) {
+func (c *Checkout) CommitAndPush(ctx context.Context, commitAction CommitAction, note interface{}, addUntracked bool) error {
+	if addUntracked {
+		if err := add(ctx, c.dir, "."); err != nil {
+			return err
+		}
+	}
+
+	if !check(ctx, c.dir, c.config.Paths, addUntracked) {
 		return ErrNoChanges
 	}
 
 	commitAction.Message += c.config.SkipMessage
+	if commitAction.SigningKey == "" {
+		commitAction.SigningKey = c.config.SigningKey
+	}
 
 	if err := commit(ctx, c.dir, commitAction); err != nil {
 		return err
 	}
 
 	if note != nil {
-		rev, err := refRevision(ctx, c.dir, "HEAD")
+		rev, err := c.HeadRevision(ctx)
 		if err != nil {
 			return err
 		}
@@ -161,11 +199,18 @@ func (c *Checkout) HeadRevision(ctx context.Context) (string, error) {
 }
 
 func (c *Checkout) SyncRevision(ctx context.Context) (string, error) {
-	return refRevision(ctx, c.dir, c.config.SyncTag)
+	return refRevision(ctx, c.dir, "tags/"+c.config.SyncTag)
 }
 
-func (c *Checkout) MoveSyncTagAndPush(ctx context.Context, ref, msg string) error {
-	return moveTagAndPush(ctx, c.dir, c.config.SyncTag, ref, msg, c.upstream.URL)
+func (c *Checkout) MoveSyncTagAndPush(ctx context.Context, tagAction TagAction) error {
+	if tagAction.SigningKey == "" {
+		tagAction.SigningKey = c.config.SigningKey
+	}
+	return moveTagAndPush(ctx, c.dir, c.config.SyncTag, c.upstream.URL, tagAction)
+}
+
+func (c *Checkout) VerifySyncTag(ctx context.Context) (string, error) {
+	return verifyTag(ctx, c.dir, c.config.SyncTag)
 }
 
 // ChangedFiles does a git diff listing changed files
@@ -181,4 +226,12 @@ func (c *Checkout) ChangedFiles(ctx context.Context, ref string) ([]string, erro
 
 func (c *Checkout) NoteRevList(ctx context.Context) (map[string]struct{}, error) {
 	return noteRevList(ctx, c.dir, c.realNotesRef)
+}
+
+func (c *Checkout) Checkout(ctx context.Context, rev string) error {
+	return checkout(ctx, c.dir, rev)
+}
+
+func (c *Checkout) Add(ctx context.Context, path string) error {
+	return add(ctx, c.dir, path)
 }

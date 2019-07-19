@@ -7,9 +7,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/weaveworks/flux"
 	"github.com/weaveworks/flux/cluster/kubernetes/testfiles"
 	"github.com/weaveworks/flux/git"
+	"github.com/weaveworks/flux/resource"
 )
 
 // Repo creates a new clone-able git repo, pre-populated with some kubernetes
@@ -55,7 +55,7 @@ func Repo(t *testing.T) (*git.Repo, func()) {
 
 	mirror := git.NewRepo(git.Remote{
 		URL: "file://" + gitDir,
-	})
+	}, git.Branch("master"))
 	return mirror, func() {
 		mirror.Clean()
 		cleanup()
@@ -65,8 +65,8 @@ func Repo(t *testing.T) (*git.Repo, func()) {
 // Workloads is a shortcut to getting the names of the workloads (NB
 // not all resources, just the workloads) represented in the test
 // files.
-func Workloads() (res []flux.ResourceID) {
-	for k, _ := range testfiles.ServiceMap("") {
+func Workloads() (res []resource.ID) {
+	for k, _ := range testfiles.WorkloadMap("") {
 		res = append(res, k)
 	}
 	return res
@@ -75,6 +75,10 @@ func Workloads() (res []flux.ResourceID) {
 // CheckoutWithConfig makes a standard repo, clones it, and returns
 // the clone, the original repo, and a cleanup function.
 func CheckoutWithConfig(t *testing.T, config git.Config) (*git.Checkout, *git.Repo, func()) {
+	// Add files to the repo with the same name as the git branch and the sync tag.
+	// This is to make sure that git commands don't have ambiguity problems between revisions and files.
+	testfiles.Files[config.Branch] = "Filename doctored to create a conflict with the git branch name"
+	testfiles.Files[config.SyncTag] = "Filename doctored to create a conflict with the git sync tag"
 	repo, cleanup := Repo(t)
 	if err := repo.Ready(context.Background()); err != nil {
 		cleanup()
@@ -89,6 +93,8 @@ func CheckoutWithConfig(t *testing.T, config git.Config) (*git.Checkout, *git.Re
 	return co, repo, func() {
 		co.Clean()
 		cleanup()
+		delete(testfiles.Files, config.Branch)
+		delete(testfiles.Files, config.SyncTag)
 	}
 }
 
